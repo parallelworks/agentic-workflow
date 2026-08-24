@@ -1,0 +1,33 @@
+#!/bin/bash
+{{DIRECTIVES}}
+#SBATCH --output={{OUTDIR}}/heat_%j.out
+#SBATCH --error={{OUTDIR}}/heat_%j.err
+
+# Slurm job script for the heat solver.
+#
+# Everything above this comment except the two --output/--error lines is the
+# VERBATIM directives block from this target in sites/sites.yaml — injected
+# untouched. The tool does not parse or validate it. Whatever you put in the
+# target's `directives:` field is exactly what Slurm sees (partition, QoS,
+# account, nodes, tasks, walltime, constraints, GPUs — all your responsibility).
+#
+# The number of MPI ranks the solver runs is set EXPLICITLY by the target's
+# mpi_ranks field ({{RANKS}} here), NOT derived from the allocation above. You
+# can request a whole node and still run fewer ranks.
+
+set -euo pipefail
+
+{{ENV_LOAD}}
+
+cd "{{RUNDIR}}"
+
+echo "== heat run: target={{TARGET}} mode={{MODE}} ranks={{RANKS}} grid={{GRID}} =="
+
+# {{MPI_LAUNCH}} from sites.yaml (e.g. "srun --mpi=pmix").
+# {{GPU_FLAG}} is "--gpu" for gpu-mode targets, empty for cpu-mode.
+{{MPI_LAUNCH}} {{BINARY}} \
+    --grid {{GRID}} \
+    --tol {{TOL}} \
+    --max-iter {{MAXITER}} \
+    {{GPU_FLAG}} \
+    --dump "{{OUTDIR}}/field_${SLURM_JOB_ID}.txt"

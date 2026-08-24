@@ -1,0 +1,5 @@
+{
+  "cluster": "pw://<user>/<cluster>",
+  "scheduler": "<slurm|pbs>",
+  "partition": "<optional-partition-or-empty>"
+}

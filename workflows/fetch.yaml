@@ -1,0 +1,43 @@
+# fetch.yaml — read the completed run's JSON record from the cluster.
+#
+# Prints the solver's one-line JSON record (grid, ranks, iterations, final_l2,
+# converged, wall_seconds, mode, distinct_hosts, hosts) and the remote path of
+# the field dump. Replaces the parsing half of scripts/fetch.sh; each fetch is a
+# logged workflow run.
+#
+# The field dump stays on the cluster; validate.yaml consumes it there. This
+# workflow only returns the run record. No file transfer, no scp.
+#
+#   pw workflows run -i runs/<id>/fetch.inputs.json --name <id>-fetch runs/<id>/fetch.yaml
+#
+# NOTE: authored to the documented schema, not runtime-verified here.
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      remote_dir:
+        label: Run-scoped working dir on the cluster
+        type: string
+        optional: false
+
+jobs:
+  fetch:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    working-directory: ${{ inputs.remote_dir }}/app/heat
+    steps:
+      - name: Emit the run record
+        run: |
+          set -euo pipefail
+          # The solver prints one JSON line on rank 0; it lands in out/heat_*.out.
+          JSON_LINE="$(grep -h '"grid"' out/*.out 2>/dev/null | grep '^{' | tail -1 || true)"
+          if [ -z "$JSON_LINE" ]; then
+            echo '{"ok":false,"error":"no solver JSON record found on cluster"}'
+            exit 1
+          fi
+          # The field dump stays on the cluster; validate.yaml consumes it there.
+          echo "$JSON_LINE"

@@ -1,0 +1,56 @@
+# validate.yaml — validate a completed run ON the cluster; return only the verdict.
+#
+# The result field stays on the cluster. This workflow runs validate.py there,
+# comparing the run's field dump against the reference delivered by the git clone,
+# and prints the verdict JSON (relative L2, pass/fail) into the run record. No
+# file comes back. Replaces the old scp-the-field-back-and-validate-locally step.
+#
+#   pw workflows run -i runs/<id>/validate.inputs.json --name <id>-validate runs/<id>/validate.yaml
+#
+# NOTE: authored to the documented schema, not runtime-verified here.
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      remote_dir:
+        label: Run-scoped working dir on the cluster (the git clone)
+        type: string
+        optional: false
+      grid:
+        label: Global grid size N (selects the reference file)
+        type: string
+        optional: false
+      tol:
+        label: Portability tolerance (relative L2)
+        type: string
+        optional: true
+
+jobs:
+  validate:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    working-directory: ${{ inputs.remote_dir }}
+    steps:
+      - name: Validate on cluster against delivered reference
+        run: |
+          set -euo pipefail
+          GRID="${{ inputs.grid }}"
+          TOL="${{ inputs.tol }}"
+          [ -n "$TOL" ] || TOL=1e-6
+
+          FIELD="$(ls -1 app/heat/out/field_*.txt 2>/dev/null | tail -1 || true)"
+          REF="app/heat/reference/heat_${GRID}.ref"
+
+          if [ -z "$FIELD" ]; then
+            echo '{"ok":false,"error":"no field dump found on cluster"}'; exit 1
+          fi
+          if [ ! -f "$REF" ]; then
+            echo "{\"ok\":false,\"error\":\"no reference for grid $GRID on cluster\"}"; exit 1
+          fi
+
+          # validate.py prints the verdict JSON on stdout and sets exit code.
+          python3 app/heat/validate.py --field "$FIELD" --reference "$REF" --tol "$TOL"

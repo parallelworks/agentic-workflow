@@ -1,0 +1,63 @@
+# capacity.yaml — snapshot a cluster's queue depth and free nodes.
+#
+# Runs read-only scheduler queries ON the remote cluster (via the job's ssh
+# block) and prints one JSON line. Replaces scripts/capacity.sh, but every
+# invocation is now a platform-logged workflow run.
+#
+# Run it (the capacity-analyst agent does this):
+#   pw workflows run -i runs/<id>/inputs.json --name <id> runs/<id>/capacity.yaml
+#
+# NOTE: authored to the documented ACTIVATE YAML schema but not runtime-verified
+# here. Validate in your environment with `pw workflows run --dry-run` first.
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      scheduler:
+        label: Scheduler (slurm|pbs)
+        type: string
+        optional: false
+      partition:
+        label: Partition/queue (optional)
+        type: string
+        optional: true
+
+jobs:
+  capacity:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    steps:
+      - name: Snapshot queue and free nodes
+        run: |
+          set -euo pipefail
+          SCHED="${{ inputs.scheduler }}"
+          PART="${{ inputs.partition }}"
+          QUEUED=0 RUNNING=0 FREE=0 RAW_OK=true
+
+          if [ "$SCHED" = "slurm" ]; then
+            PFLAG=""; [ -n "$PART" ] && PFLAG="-p $PART"
+            if STATES="$(squeue $PFLAG -h -o '%T' 2>/dev/null)"; then
+              QUEUED=$(printf '%s\n' "$STATES" | grep -c '^PENDING' || true)
+              RUNNING=$(printf '%s\n' "$STATES" | grep -c '^RUNNING' || true)
+            else RAW_OK=false; fi
+            if IDLE="$(sinfo $PFLAG -h -t idle -o '%D' 2>/dev/null)"; then
+              FREE=$(printf '%s\n' "$IDLE" | awk '{s+=$1} END{print s+0}')
+            else RAW_OK=false; fi
+          elif [ "$SCHED" = "pbs" ]; then
+            if JOBS="$(qstat 2>/dev/null)"; then
+              QUEUED=$(printf '%s\n' "$JOBS" | awk '$5=="Q"{c++} END{print c+0}')
+              RUNNING=$(printf '%s\n' "$JOBS" | awk '$5=="R"{c++} END{print c+0}')
+            else RAW_OK=false; fi
+            if NODES="$(pbsnodes -a 2>/dev/null)"; then
+              FREE=$(printf '%s\n' "$NODES" | grep -c 'state = free' || true)
+            else RAW_OK=false; fi
+          else
+            echo "capacity: unknown scheduler '$SCHED'" >&2; exit 2
+          fi
+
+          printf '{"scheduler":"%s","partition":"%s","queued":%s,"running":%s,"free_nodes":%s,"raw_ok":%s}\n' \
+            "$SCHED" "$PART" "$QUEUED" "$RUNNING" "$FREE" "$RAW_OK"

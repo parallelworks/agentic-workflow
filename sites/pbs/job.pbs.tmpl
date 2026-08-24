@@ -1,0 +1,32 @@
+#!/bin/bash
+{{DIRECTIVES}}
+#PBS -o {{OUTDIR}}/heat.out
+#PBS -e {{OUTDIR}}/heat.err
+
+# PBS job script for the heat solver.
+#
+# Everything above this comment except the two -o/-e lines is the VERBATIM
+# directives block from this target in sites/sites.yaml — injected untouched.
+# The tool does not parse or validate it. Whatever you put in the target's
+# `directives:` field is exactly what PBS sees (queue, account, select/ncpus/
+# mpiprocs/ngpus, walltime — all your responsibility).
+#
+# The number of MPI ranks the solver runs is set EXPLICITLY by the target's
+# mpi_ranks field ({{RANKS}} here), NOT derived from the select statement above.
+
+set -euo pipefail
+
+{{ENV_LOAD}}
+
+cd "{{RUNDIR}}"
+
+echo "== heat run: target={{TARGET}} mode={{MODE}} ranks={{RANKS}} grid={{GRID}} =="
+
+# {{MPI_LAUNCH}} from sites.yaml (e.g. "mpirun").
+# {{GPU_FLAG}} is "--gpu" for gpu-mode targets, empty for cpu-mode.
+{{MPI_LAUNCH}} -np {{RANKS}} {{BINARY}} \
+    --grid {{GRID}} \
+    --tol {{TOL}} \
+    --max-iter {{MAXITER}} \
+    {{GPU_FLAG}} \
+    --dump "{{OUTDIR}}/field_${PBS_JOBID}.txt"
