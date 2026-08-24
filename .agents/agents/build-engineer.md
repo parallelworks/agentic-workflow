@@ -15,8 +15,8 @@ For a target:
 
 1. Form the id `build-engineer-<target>-<NNNNNN>` and stage `./runs/<id>/` with
    `stage.yaml` + `build.yaml` and their inputs.
-2. Autodetect repo URL and commit; apply the DIRTY-TREE GUARD (warn and ask if
-   uncommitted/unpushed). Then STAGE: run `stage.yaml` (`--name <id>-stage`) to
+2. Autodetect repo URL (`git remote get-url origin`) and commit
+   (`git rev-parse HEAD`). STAGE: run `stage.yaml` (`--name <id>-stage`) to
    git-clone the repo into `~/pw-heat/<id>/` and check out the commit.
 3. Fill `build.inputs.json` from the target (cluster URI, remote_dir, mode,
    env_load) and run:

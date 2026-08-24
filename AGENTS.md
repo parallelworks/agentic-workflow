@@ -62,12 +62,6 @@ Both are workflow inputs, so the user may override URL/branch/commit when needed
 The stage workflow clones the URL and checks out the exact commit, so the cluster
 runs precisely the code the agent introspected (provenance by SHA).
 
-DIRTY-TREE GUARD (do this before staging): run `git status --porcelain` and
-confirm HEAD is pushed to the remote (e.g. `git branch -r --contains HEAD`). If
-there are uncommitted or unpushed changes, the cluster clone would run STALE
-code. In that case, WARN the user and ASK whether to proceed with the last
-pushed commit or stop and commit/push first. Never stage stale code silently.
-
 ASSUMPTION: the repository is public, so the clone needs no credentials on the
 cluster. A private repo would reintroduce credential handling and is out of
 scope for this workshop.
@@ -99,7 +93,7 @@ there is a durable record of exactly what was run.
    the verbatim block; base64 keeps it a single safe token). Get the env_load
    value (verbatim setup commands joined with &&, no prefixing) with
    `_site_query.py sites/sites.yaml <target> env_load_joined`. Autodetect the
-   repo URL and commit as above.
+   repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
 3. Fill `./runs/<id>/<op>.inputs.json`.
 4. STAGE the source: run `stage.yaml` (git clone + checkout the commit into
    `~/pw-heat/<id>/`). Then `build.yaml`, then `submit.yaml`.

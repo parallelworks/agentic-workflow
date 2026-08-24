@@ -8,7 +8,7 @@
 #   pw workflows run -i runs/<id>/stage.inputs.json --name <id>-stage runs/<id>/stage.yaml
 #
 # The agent autodetects repo_url (git remote get-url origin) and commit
-# (git rev-parse HEAD), and applies the dirty-tree guard first (see AGENTS.md).
+# (git rev-parse HEAD). Both are workflow inputs; the user may override.
 #
 # NOTE: authored to the documented schema, not runtime-verified here.
 
