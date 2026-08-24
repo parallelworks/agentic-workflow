@@ -40,7 +40,7 @@ jobs:
       - name: Clone repo and checkout commit
         run: |
           set -euo pipefail
-          DEST="${{ inputs.remote_dir }}"
+          DEST="$HOME/${{ inputs.remote_dir }}"
           URL="${{ inputs.repo_url }}"
           SHA="${{ inputs.commit }}"
 

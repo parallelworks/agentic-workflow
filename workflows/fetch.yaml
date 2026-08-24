@@ -28,11 +28,11 @@ jobs:
   fetch:
     ssh:
       remoteHost: ${{ inputs.cluster.ip }}
-    working-directory: ${{ inputs.remote_dir }}/app/heat
     steps:
       - name: Emit the run record
         run: |
           set -euo pipefail
+          cd "$HOME/${{ inputs.remote_dir }}/app/heat"
           # The solver prints one JSON line on rank 0; it lands in out/heat_*.out.
           JSON_LINE="$(grep -h '"grid"' out/*.out 2>/dev/null | grep '^{' | tail -1 || true)"
           if [ -z "$JSON_LINE" ]; then

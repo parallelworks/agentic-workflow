@@ -23,7 +23,7 @@ target + grid:
    env_load commands, and the base64 of the directives block. Autodetect the
    repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
 3. STAGE: `pw workflows run -i runs/<id>/stage.inputs.json --name <id>-stage
-   runs/<id>/stage.yaml`. This git-clones the repo into `~/pw-heat/<id>/` on the
+   runs/<id>/stage.yaml`. This git-clones the repo into `$HOME/pw-heat/<id>/` on the
    cluster and checks out the commit (delivering heat.c, Makefile, validate.py,
    and the reference field together).
 4. BUILD: run `build.yaml` (`--name <id>-build`). Stop and report if it fails.

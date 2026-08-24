@@ -33,11 +33,11 @@ jobs:
   validate:
     ssh:
       remoteHost: ${{ inputs.cluster.ip }}
-    working-directory: ${{ inputs.remote_dir }}
     steps:
       - name: Validate on cluster against delivered reference
         run: |
           set -euo pipefail
+          cd "$HOME/${{ inputs.remote_dir }}"
           GRID="${{ inputs.grid }}"
           TOL="${{ inputs.tol }}"
           [ -n "$TOL" ] || TOL=1e-6
