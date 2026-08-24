@@ -1,0 +1,40 @@
+# grid-sweep.yaml — an example campaign the campaign-orchestrator expands.
+#
+# A campaign is a small sweep over TARGETS and grid sizes. Each target already
+# fixes its own mode, ranks, and scheduler directives (in sites/sites.yaml), so
+# a campaign only picks WHICH targets and WHICH grids to run. The orchestrator
+# takes the cross product of targets x grids and delegates each run to
+# site-runner.
+#
+# Keep workshop campaigns small — Jacobi convergence scales with grid^2, so
+# grid 128 is ~0.3s and grid 256 is ~6s at tol 1e-3.
+
+name: intro-sweep
+description: A first campaign — small grids across several targets, CPU and GPU.
+
+# Global solver settings applied to every run.
+solver:
+  tol: 1e-3
+  max_iter: 50000
+
+# Sweep axes: the cross product of these is the run list.
+axes:
+  grid: [128, 256]
+  # Target names must match entries in sites/sites.yaml. Listing both a cpu and
+  # a gpu target for the same cluster runs both node types — nothing is
+  # auto-selected. Comment out any target you don't want in the sweep.
+  target:
+    - bigcluster-cpu
+    - bigcluster-gpu
+    - pbscluster-cpu
+    - pbscluster-gpu
+
+# ---------------------------------------------------------------------------
+# Try, in the workshop:
+#   "Use the campaign-orchestrator to run campaigns/grid-sweep.yaml, then have
+#    the portability-analyst compare the grid=128 results across the cpu targets."
+#
+# Note there are no node/rank knobs here: those live in each target's definition
+# in sites.yaml, where the verbatim scheduler directives and explicit mpi_ranks
+# are set. A campaign never overrides them.
+# ---------------------------------------------------------------------------

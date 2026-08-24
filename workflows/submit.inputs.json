@@ -1,0 +1,13 @@
+{
+  "cluster": "pw://<user>/<cluster>",
+  "remote_dir": "~/pw-heat/<agent>-<target>-<NNNNNN>",
+  "scheduler": "<slurm|pbs>",
+  "mode": "<cpu|gpu>",
+  "mpi_ranks": "<int, from target mpi_ranks>",
+  "grid": "128",
+  "tol": "1e-3",
+  "max_iter": "50000",
+  "mpi_launch": "srun --mpi=pmix",
+  "directives_b64": "<base64 of target directives; see AGENTS.md for how to produce>",
+  "env_load": "module load gcc/12 && module load openmpi/4.1"
+}

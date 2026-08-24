@@ -1,0 +1,113 @@
+# submit.yaml — render the job script ON the cluster and submit it.
+#
+# The target's VERBATIM #SBATCH/#PBS directives arrive as one string input
+# (directives) and are written to the job script untouched — the workflow does
+# NOT parse them, exactly like the old submit.sh. The solver runs exactly
+# mpi_ranks ranks. Prints the scheduler job id. Replaces scripts/submit.sh; the
+# submit is now a logged workflow run.
+#
+# Prerequisite: source git-cloned by stage.yaml and compiled by build.yaml (run
+# build.yaml first). The binary (heat or heat_gpu) must exist there.
+#
+#   pw workflows run -i runs/<id>/inputs.json --name <id> runs/<id>/submit.yaml
+#
+# NOTE: authored to the documented schema, not runtime-verified here.
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      remote_dir:
+        label: Run-scoped working dir on the cluster
+        type: string
+        optional: false
+      scheduler:
+        label: Scheduler (slurm|pbs)
+        type: string
+        optional: false
+      mode:
+        label: Run mode (cpu|gpu)
+        type: string
+        optional: false
+      mpi_ranks:
+        label: MPI ranks (explicit; not derived from allocation)
+        type: string
+        optional: false
+      grid:
+        label: Global grid size N (NxN)
+        type: string
+        optional: false
+      tol:
+        label: Convergence tolerance
+        type: string
+        optional: false
+      max_iter:
+        label: Max iterations
+        type: string
+        optional: false
+      mpi_launch:
+        label: MPI launch command (e.g. srun --mpi=pmix, mpirun)
+        type: string
+        optional: false
+      env_load:
+        label: Environment setup commands, verbatim, joined with && (module load / source / conda / spack ...)
+        type: string
+        optional: true
+      directives_b64:
+        label: Verbatim scheduler directives block, base64-encoded
+        type: string
+        optional: false
+
+jobs:
+  submit:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    working-directory: ${{ inputs.remote_dir }}/app/heat
+    steps:
+      - name: Render job script with verbatim directives
+        run: |
+          set -euo pipefail
+          SCHED="${{ inputs.scheduler }}"
+          MODE="${{ inputs.mode }}"
+          if [ "$MODE" = "gpu" ]; then BIN=./heat_gpu; GPU_FLAG=--gpu; else BIN=./heat; GPU_FLAG=""; fi
+          mkdir -p out
+
+          # Write the job script. The directives block is injected verbatim.
+          # We add only the output/error redirection and the solver invocation.
+          if [ "$SCHED" = "slurm" ]; then
+            SCRIPT=job.sbatch
+            {
+              echo '#!/bin/bash'
+              echo "${{ inputs.directives_b64 }}" | base64 -d
+              echo ""
+              echo "#SBATCH --output=out/heat_%j.out"
+              echo "#SBATCH --error=out/heat_%j.err"
+              echo 'set -euo pipefail'
+              echo '{ ${{ inputs.env_load }} ; } 2>/dev/null || true'
+              echo "${{ inputs.mpi_launch }} $BIN --grid ${{ inputs.grid }} --tol ${{ inputs.tol }} --max-iter ${{ inputs.max_iter }} $GPU_FLAG --dump out/field_\${SLURM_JOB_ID}.txt"
+            } > "$SCRIPT"
+            echo "== rendered $SCRIPT =="; cat "$SCRIPT"
+            JOBID="$(sbatch "$SCRIPT" | tr -dc '0-9')"
+          elif [ "$SCHED" = "pbs" ]; then
+            SCRIPT=job.pbs
+            {
+              echo '#!/bin/bash'
+              echo "${{ inputs.directives_b64 }}" | base64 -d
+              echo ""
+              echo "#PBS -o out/heat.out"
+              echo "#PBS -e out/heat.err"
+              echo 'set -euo pipefail'
+              echo '{ ${{ inputs.env_load }} ; } 2>/dev/null || true'
+              echo "${{ inputs.mpi_launch }} -np ${{ inputs.mpi_ranks }} $BIN --grid ${{ inputs.grid }} --tol ${{ inputs.tol }} --max-iter ${{ inputs.max_iter }} $GPU_FLAG --dump out/field_\${PBS_JOBID}.txt"
+            } > "$SCRIPT"
+            echo "== rendered $SCRIPT =="; cat "$SCRIPT"
+            JOBID="$(qsub "$SCRIPT" | tr -dc '0-9.')"
+          else
+            echo "submit: unknown scheduler '$SCHED'" >&2; exit 2
+          fi
+
+          echo "SUBMITTED scheduler=$SCHED job_id=$JOBID remote_dir=${{ inputs.remote_dir }}"
+          echo "$JOBID" > out/job_id.txt

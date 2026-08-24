@@ -1,0 +1,58 @@
+# poll.yaml — report a job's state uniformly (slurm|pbs) from the cluster.
+#
+# The agent runs this repeatedly until state is DONE. Replaces scripts/poll.sh;
+# each poll is a logged workflow run. (For frequent polling you may prefer fewer,
+# spaced runs to keep the run log readable.)
+#
+#   pw workflows run -i runs/<id>/poll.inputs.json --name <id>-poll runs/<id>/poll.yaml
+#
+# NOTE: authored to the documented schema, not runtime-verified here.
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      scheduler:
+        label: Scheduler (slurm|pbs)
+        type: string
+        optional: false
+      job_id:
+        label: Scheduler job id to poll
+        type: string
+        optional: false
+
+jobs:
+  poll:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    steps:
+      - name: Report job state
+        run: |
+          set -euo pipefail
+          SCHED="${{ inputs.scheduler }}"
+          JOBID="${{ inputs.job_id }}"
+          emit() { printf '{"job_id":"%s","state":"%s","raw":"%s"}\n' "$JOBID" "$1" "$2"; }
+
+          if [ "$SCHED" = "slurm" ]; then
+            RAW="$(squeue -j "$JOBID" -h -o '%T' 2>/dev/null || true)"
+            if [ -z "$RAW" ]; then emit "DONE" ""; exit 0; fi
+            case "$RAW" in
+              PENDING|CONFIGURING) emit "PENDING" "$RAW";;
+              RUNNING|COMPLETING)  emit "RUNNING" "$RAW";;
+              *)                   emit "UNKNOWN" "$RAW";;
+            esac
+          elif [ "$SCHED" = "pbs" ]; then
+            RAW="$(qstat -f "$JOBID" 2>/dev/null | awk -F= '/job_state/{gsub(/ /,\"\",$2);print $2}' || true)"
+            if [ -z "$RAW" ]; then emit "DONE" ""; exit 0; fi
+            case "$RAW" in
+              Q|H) emit "PENDING" "$RAW";;
+              R|E) emit "RUNNING" "$RAW";;
+              C)   emit "DONE" "$RAW";;
+              *)   emit "UNKNOWN" "$RAW";;
+            esac
+          else
+            echo "poll: unknown scheduler '$SCHED'" >&2; exit 2
+          fi
