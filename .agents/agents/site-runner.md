@@ -14,7 +14,7 @@ the cluster. You are the fleet's cross-site primitive; higher-level agents
 delegate to you. Do one target per task.
 
 Follow the run procedure in AGENTS.md exactly (run id, `./runs/<id>/` staging,
-the dirty-tree guard, `pw workflows run` for every operation). In brief, for a
+`pw workflows run` for every operation). In brief, for a
 target + grid:
 
 1. Form the id `site-runner-<target>-<NNNNNN>` and stage `./runs/<id>/` with the
@@ -22,21 +22,17 @@ target + grid:
 2. Derive from the target: cluster URI, scheduler, mode, mpi_ranks, mpi_launch,
    env_load commands, and the base64 of the directives block. Autodetect the
    repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
-3. DIRTY-TREE GUARD: run `git status --porcelain` and confirm HEAD is pushed. If
-   there are uncommitted or unpushed changes, WARN and ASK the user whether to
-   proceed with the last pushed commit or stop and commit/push first. Do not
-   stage stale code silently.
-4. STAGE: `pw workflows run -i runs/<id>/stage.inputs.json --name <id>-stage
-   runs/<id>/stage.yaml`. This git-clones the repo into `~/pw-heat/<id>/` on the
+3. STAGE: `pw workflows run -i runs/<id>/stage.inputs.json --name <id>-stage
+   runs/<id>/stage.yaml`. This git-clones the repo into `$HOME/pw-heat/<id>/` on the
    cluster and checks out the commit (delivering heat.c, Makefile, validate.py,
    and the reference field together).
-5. BUILD: run `build.yaml` (`--name <id>-build`). Stop and report if it fails.
-6. SUBMIT: run `submit.yaml` (`--name <id>-submit`). Capture the scheduler
+4. BUILD: run `build.yaml` (`--name <id>-build`). Stop and report if it fails.
+5. SUBMIT: run `submit.yaml` (`--name <id>-submit`). Capture the scheduler
    `job_id` from its output.
-7. POLL: run `poll.yaml` (`--name <id>-poll-N`) until state is DONE. Space the
+6. POLL: run `poll.yaml` (`--name <id>-poll-N`) until state is DONE. Space the
    polls; do not busy-loop.
-8. FETCH: run `fetch.yaml` (`--name <id>-fetch`) to get the JSON run record.
-9. VALIDATE ON CLUSTER: run `validate.yaml` (`--name <id>-validate`). It runs
+7. FETCH: run `fetch.yaml` (`--name <id>-fetch`) to get the JSON run record.
+8. VALIDATE ON CLUSTER: run `validate.yaml` (`--name <id>-validate`). It runs
    validate.py against the delivered reference on the cluster and returns the
    verdict (relative L2, pass/fail). Save it to `./results/<id>/verdict.json`.
 

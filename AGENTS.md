@@ -38,6 +38,14 @@ does lives in its definition file, not here (kept in one place on purpose).
 Delegate to the right specialist rather than doing its job yourself; steer
 explicitly when useful ("use the portability-analyst to compare these runs").
 
+NO SHARED CLUSTER STATE BETWEEN AGENTS. Each agent works in its own run-scoped
+remote directory (`$HOME/pw-heat/<agent>-<target>-<NNNNNN>/`) and never reuses
+another agent's built binary. site-runner builds its own binary as part of its
+run; build-engineer builds only to DIAGNOSE the toolchain and hands off nothing.
+The solver compiles in seconds, so this duplication is deliberate — it keeps
+agents decoupled and avoids any "did the other agent's build land where I look?"
+coupling. Do not add a cross-agent binary handoff.
+
 ## How agents run things on a cluster (READ THIS)
 
 **One channel reaches a cluster: `pw workflows run`.** Every operation — stage
@@ -62,12 +70,6 @@ Both are workflow inputs, so the user may override URL/branch/commit when needed
 The stage workflow clones the URL and checks out the exact commit, so the cluster
 runs precisely the code the agent introspected (provenance by SHA).
 
-DIRTY-TREE GUARD (do this before staging): run `git status --porcelain` and
-confirm HEAD is pushed to the remote (e.g. `git branch -r --contains HEAD`). If
-there are uncommitted or unpushed changes, the cluster clone would run STALE
-code. In that case, WARN the user and ASK whether to proceed with the last
-pushed commit or stop and commit/push first. Never stage stale code silently.
-
 ASSUMPTION: the repository is public, so the clone needs no credentials on the
 cluster. A private repo would reintroduce credential handling and is out of
 scope for this workshop.
@@ -79,7 +81,10 @@ where NNNNNN is a 6-digit zero-padded integer (first free number per
 agent+target). That single id is used three ways for end-to-end traceability:
 the local staging dir `./runs/<id>/`, the `--name <id>` of the workflow run (so
 the platform run traces back to the artifacts), and the remote working directory
-`~/pw-heat/<id>/` on the cluster.
+`$HOME/pw-heat/<id>/` on the cluster. Note the `remote_dir` workflow input is a
+RELATIVE path (`pw-heat/<id>`, no `~` and no leading `/`); the workflow steps
+anchor it to `$HOME` themselves. Do not put `~` in `remote_dir` — a literal tilde
+is not expanded and becomes a directory named `~`.
 
 Before running a workflow, STAGE it: create `./runs/<id>/`, copy the relevant
 `./workflows/<op>.yaml` and `<op>.inputs.json` into it, and fill in every
@@ -99,10 +104,10 @@ there is a durable record of exactly what was run.
    the verbatim block; base64 keeps it a single safe token). Get the env_load
    value (verbatim setup commands joined with &&, no prefixing) with
    `_site_query.py sites/sites.yaml <target> env_load_joined`. Autodetect the
-   repo URL and commit as above.
+   repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
 3. Fill `./runs/<id>/<op>.inputs.json`.
 4. STAGE the source: run `stage.yaml` (git clone + checkout the commit into
-   `~/pw-heat/<id>/`). Then `build.yaml`, then `submit.yaml`.
+   `$HOME/pw-heat/<id>/`). Then `build.yaml`, then `submit.yaml`.
 5. `pw workflows run -i runs/<id>/<op>.inputs.json --name <id> runs/<id>/<op>.yaml`
    (append a distinct suffix like `<id>-poll` for repeated polls).
 6. RESULTS: after the job completes, run `validate.yaml` on the cluster. It runs

@@ -65,11 +65,11 @@ jobs:
   submit:
     ssh:
       remoteHost: ${{ inputs.cluster.ip }}
-    working-directory: ${{ inputs.remote_dir }}/app/heat
     steps:
       - name: Render job script with verbatim directives
         run: |
           set -euo pipefail
+          cd "$HOME/${{ inputs.remote_dir }}/app/heat"
           SCHED="${{ inputs.scheduler }}"
           MODE="${{ inputs.mode }}"
           if [ "$MODE" = "gpu" ]; then BIN=./heat_gpu; GPU_FLAG=--gpu; else BIN=./heat; GPU_FLAG=""; fi
@@ -109,5 +109,5 @@ jobs:
             echo "submit: unknown scheduler '$SCHED'" >&2; exit 2
           fi
 
-          echo "SUBMITTED scheduler=$SCHED job_id=$JOBID remote_dir=${{ inputs.remote_dir }}"
+          echo "SUBMITTED scheduler=$SCHED job_id=$JOBID remote_dir=$HOME/${{ inputs.remote_dir }}"
           echo "$JOBID" > out/job_id.txt

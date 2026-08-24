@@ -1,4 +1,4 @@
 {
   "cluster": "pw://<user>/<cluster>",
-  "remote_dir": "~/pw-heat/<agent>-<target>-<NNNNNN>"
+  "remote_dir": "pw-heat/<agent>-<target>-<NNNNNN>"
 }

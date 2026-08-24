@@ -1,7 +1,7 @@
 # build.yaml — compile the heat solver ON the remote cluster.
 #
 # Prerequisite: the stage workflow has already git-cloned the repo to
-# ${{ inputs.remote_dir }}/app/heat after the stage workflow git-clones the repo
+# $HOME/${{ inputs.remote_dir }}/app/heat after the stage workflow git-clones the repo
 # there. This workflow loads the target env_load and runs make, so the
 # binary matches the cluster's compiler/MPI/fabric. Replaces the remote half of
 # the old build step; every build is now a logged workflow run.
@@ -34,18 +34,19 @@ jobs:
   build:
     ssh:
       remoteHost: ${{ inputs.cluster.ip }}
-    working-directory: ${{ inputs.remote_dir }}/app/heat
     steps:
       - name: Show toolchain
         run: |
           set -euo pipefail
+          cd "$HOME/${{ inputs.remote_dir }}/app/heat"
           { ${{ inputs.env_load }} ; } 2>/dev/null || true
           echo "== toolchain on $(hostname) =="
-          which mpicc || { echo "mpicc not found after module loads" >&2; exit 2; }
+          which mpicc || { echo "mpicc not found after env_load" >&2; exit 2; }
           mpicc --version 2>/dev/null | head -1 || true
       - name: Build the requested mode
         run: |
           set -euo pipefail
+          cd "$HOME/${{ inputs.remote_dir }}/app/heat"
           { ${{ inputs.env_load }} ; } 2>/dev/null || true
           MODE="${{ inputs.mode }}"
           if [ "$MODE" = "gpu" ]; then
