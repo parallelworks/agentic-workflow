@@ -1,7 +1,6 @@
 # run.yaml — stage + build + submit, as one atomic workflow.
 #
-# Merges the former stage.yaml, build.yaml, and submit.yaml into a single logged
-# run. These three steps only make sense together — clone the repo, compile it,
+# These three steps make sense together — clone the repo, compile it,
 # submit the job — all in the same SSH session and working directory, so merging
 # them removes the cross-invocation state problem entirely (no "will the next
 # run find what the last one built?"). Each step prints a clear phase marker
@@ -13,8 +12,6 @@
 # The agent autodetects repo_url (git remote get-url origin) and commit
 # (git rev-parse HEAD); both are inputs the user may override. Directives arrive
 # base64-encoded (a single safe token); the solver runs exactly mpi_ranks ranks.
-#
-# NOTE: authored to the documented schema, not runtime-verified here.
 
 'on':
   execute:

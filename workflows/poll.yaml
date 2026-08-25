@@ -1,12 +1,10 @@
 # poll.yaml — report a job's state uniformly (slurm|pbs) from the cluster.
 #
-# The agent runs this repeatedly until state is DONE. Replaces scripts/poll.sh;
-# each poll is a logged workflow run. (For frequent polling you may prefer fewer,
+# The agent runs this repeatedly until state is DONE.
+# Each poll is a logged workflow run. (For frequent polling you may prefer fewer,
 # spaced runs to keep the run log readable.)
 #
 #   pw workflows run -i runs/<id>/poll.inputs.json --name <id>-poll runs/<id>/poll.yaml
-#
-# NOTE: authored to the documented schema, not runtime-verified here.
 
 'on':
   execute:
