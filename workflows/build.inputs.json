@@ -1,6 +1,0 @@
-{
-  "cluster": "pw://<user>/<cluster>",
-  "remote_dir": "pw-heat/<agent>-<target>-<NNNNNN>",
-  "mode": "<cpu|gpu>",
-  "env_load": "module load gcc/12 && module load openmpi/4.1"
-}

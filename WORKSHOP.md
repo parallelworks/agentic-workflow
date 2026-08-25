@@ -1,6 +1,6 @@
 # Facilitator Guide
 
-A ~2-hour workshop. Four exercises, one per capability, each driven by asking
+A ~2-hour workshop. Three exercises across the four agents, each driven by asking
 `pw code` in plain language and letting it delegate to the custom agents. Times
 are guidance for a group that has `pw code` working and `sites.yaml` filled in.
 
@@ -22,8 +22,8 @@ Do this in advance — it is where workshops actually go wrong:
       by hand. Give clusters with both node types separate cpu and gpu targets.
 - [ ] The CPU build compiles on each site: `make -C app/heat cpu`.
 - [ ] On GPU sites, the GPU build compiles: `make -C app/heat gpu` (NVIDIA HPC
-      SDK). If it doesn't, that's fine — Exercise 3 is partly about discovering
-      exactly that, but you want to know in advance.
+      SDK). If it doesn't, that's fine — site-runner's run workflow surfaces the
+      build failure in its `=== BUILD ===` phase, but you want to know in advance.
 - [ ] A **two-node** CPU job actually launches on two nodes on at least one site.
       Test the MPI launch flag (`srun --mpi=pmix` or the site's mpirun/PMI). A
       wrong PMI flag is the most common reason a "2-node" job silently runs on
@@ -59,7 +59,30 @@ Frame the three ideas participants need:
 
 ---
 
-## Exercise 1 — Orchestrate a campaign across sites (25 min)
+## Exercise 1 — Capacity analysis: which target? (20 min)
+
+**Goal:** decide placement from real signals, not guesses.
+
+Ask `pw code`:
+
+> "Ask the capacity-analyst which target I should use for a GPU run, and which
+> for a CPU job right now."
+
+What to watch for:
+- The analyst lists candidate targets from `sites.yaml`, groups those sharing a
+  cluster URI (same cluster, different ways to run), snapshots each cluster's
+  queue with the `capacity.yaml` workflow, and recommends a target whose mode
+  matches the work and whose cluster is least loaded.
+- It matches mode to the request — never steers a CPU job to a GPU target just
+  because GPUs exist.
+- It's READ-ONLY: it recommends, it doesn't submit.
+- It does NOT compute GPU-memory fit — the tooling never parses directives or
+  infers hardware, so whether a problem fits is the user's call. Teaching point:
+  explicit control means explicit responsibility.
+
+---
+
+## Exercise 2 — Orchestrate a campaign across the fleet (30 min)
 
 **Goal:** run the same study across the fleet with one request.
 
@@ -69,100 +92,49 @@ Ask `pw code`:
 
 What to watch for:
 - The orchestrator expands the sweep and delegates each run to `site-runner`,
-  issuing independent runs in the same turn so sites run in parallel.
-- Any campaign entry naming a target that isn't in `sites.yaml` is skipped with
-  a reason, rather than guessed at. Every run uses exactly the ranks and
-  directives its target declares.
-- The summary table: one row per run with site, mode, grid, ranks, iterations,
-  wall time, converged, distinct_hosts.
+  issuing independent runs in the same turn so targets run in parallel.
+- Each `site-runner` run is ONE workflow (`run.yaml`) that git-clones the repo on
+  the cluster, builds the solver, and submits — then polls to DONE. Watch the
+  `=== STAGE ===`, `=== BUILD ===`, `=== SUBMIT ===` phase markers in the run log;
+  if a run fails, they show exactly which phase broke.
+- Any campaign entry naming a target not in `sites.yaml` is skipped with a
+  reason. Every run uses exactly the ranks and directives its target declares.
 
-Talking point: the campaign file is the sweep; the agent is the dispatcher.
-Adding a site or a grid size is a data change, not a code change.
+Talking point: the campaign file is the sweep; the orchestrator is the
+dispatcher; `site-runner` is the one agent that touches a cluster. Adding a
+target or a grid size is a data change, not a code change.
 
 ---
 
-## Exercise 2 — Portability by comparing results (30 min)
+## Exercise 3 — Evaluate: portability AND performance (30 min)
 
-**Goal:** prove (or disprove) that the same problem gives the same answer on
-different clusters.
+**Goal:** once the runs are done, prove (or disprove) that the clusters reproduce
+the same solution, and compare their run times — in one evaluation.
 
 Ask `pw code`:
 
-> "Have the portability-analyst run grid 128 on the cpu targets of both
-> clusters and compare the results against the reference."
+> "Now have the evaluator fetch and validate all the completed runs, and report
+> portability and performance."
 
 What to watch for:
-- The analyst holds the grid FIXED, delegates one run per site to `site-runner`,
-  then validates each field with `app/heat/validate.py` against
-  `reference/heat_128.ref`.
-- The verdict is a **relative L2 difference**, not a vibe. A small nonzero L2
-  across different compilers or CPU-vs-GPU is expected; a large L2 is a real
-  bug (broken halo exchange, wrong stencil).
-- The table separates **correctness** (match the reference?) from
-  **performance** (wall times), and the analyst does NOT turn a speed difference
-  into a placement recommendation — that's Exercise 4.
+- The evaluator waits for `site-runner` to confirm runs are DONE, then does the
+  fetch and validate itself — on every run, reading each one from *site-runner's*
+  remote directory where the field dump lives.
+- Validation runs `validate.py` ON the cluster against the reference the run
+  workflow delivered; only the verdict (relative L2, pass/fail) comes back. The
+  field never leaves the cluster.
+- **Portability**: a small nonzero L2 across different compilers or CPU-vs-GPU is
+  expected; a large L2 is a real bug (broken halo exchange, wrong stencil). The
+  evaluator also confirms each run actually converged (didn't just hit the cap).
+- **Performance**: wall times compared across targets and CPU vs GPU, descriptive.
+- **Integrity**: multi-node honesty (`distinct_hosts` vs what the directives
+  requested) and provenance (same commit SHA across a comparison).
 
-Key teaching moment: this is why we chose the heat solver over a
-verification-only workload. "Same converged field within tolerance" is a
-checkable, quantitative portability claim. Show the negative control if you have
-time — corrupt a field and re-validate to see it fail.
-
----
-
-## Exercise 3 — Software builds per site (20 min)
-
-**Goal:** get the solver building on heterogeneous toolchains and surface the
-differences.
-
-Ask `pw code`:
-
-> "Use the build-engineer to build the solver on both sites and report what
-> toolchain each one has."
-
-What to watch for:
-- The CPU build should succeed on both. The GPU build is attempted only on GPU
-  sites; on the CPU-only site its absence is a finding, not a failure.
-- Expected real-world findings the agent should surface: the OpenACC build needs
-  `nvc` (NVIDIA HPC SDK); older PGI `pgcc` pragmas may need updates; a two-node
-  launch needs the right PMI flag.
-
-Talking point: the build-engineer turns "it didn't compile" into a specific,
-actionable finding (which flag, which pragma, which module), which is exactly
-what you want an agent doing across a fleet you don't hand-tune. Note it is
-purely diagnostic — it reports the toolchain and hands off no binary. When you
-actually run a job, site-runner builds its own (the solver compiles in seconds),
-so build-engineer is for answering "does this build here?" without submitting.
-
----
-
-## Exercise 4 — Capacity analysis: where should this run? (25 min)
-
-**Goal:** decide placement from real signals, not guesses.
-
-Ask `pw code` two questions:
-
-> "Ask the capacity-analyst which target I should use for a GPU run."
-
-> "And which target should a CPU job go to right now?"
-
-What to watch for:
-- The analyst lists the candidate targets from `sites.yaml`, groups those that
-  share an `ssh_name` (same cluster, different ways to run), snapshots each
-  cluster's queue with the `capacity.yaml` workflow, and recommends a target whose
-  mode matches the work and whose cluster is least loaded.
-- It matches mode to the request — it never steers a CPU job to a GPU target
-  just because GPUs exist.
-- It's READ-ONLY: it recommends, it doesn't submit. If participants want the job
-  run, that goes back to `site-runner` / `campaign-orchestrator`.
-- It offers the **fallback ladder** when capacity is tight.
-- It does NOT compute GPU-memory fit — the tool no longer parses directives or
-  infers hardware, so whether a problem fits the GPUs a target requested is the
-  user's call. A good teaching point: this is the cost of the flexibility you
-  asked for — explicit control means explicit responsibility.
-
-Optional capstone: chain it. "Recommend a site, run it there, then have the
-results-reviewer audit the run." This shows the full loop — decide, run, verify —
-across four agents.
+Key teaching moment: this is why we chose the heat solver — "same converged field
+within tolerance" is a checkable, quantitative portability claim, and the
+evaluator reports correctness and performance together rather than in isolation.
+Show the negative control if time allows — a run that hit the iteration cap
+without converging is flagged, not silently accepted.
 
 ---
 
@@ -182,7 +154,7 @@ valid workshop result.
 
 **Multi-node honesty.** "MPI ran with N ranks" does not prove N nodes. The
 solver's rank→host roll-call (`distinct_hosts`, `hosts[]`) is the ground truth,
-and `results-reviewer` flags any run that asked for more nodes than it used. A
+and the evaluator flags any run that asked for more nodes than it used. A
 deliberate one-node run is valid; a *silent* collapse to one node is the bug.
 
 ---

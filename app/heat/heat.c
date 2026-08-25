@@ -66,7 +66,7 @@
  * BUILD
  *   CPU:  mpicc -O3 -o heat heat.c -lm
  *   GPU:  mpicc -O3 -acc -Minfo=accel -o heat_gpu heat.c -lm   (NVIDIA HPC SDK)
- *   (See the Makefile; the build-engineer agent discovers the right toolchain.)
+ *   (See the Makefile; site-runner's run workflow builds the right mode.)
  *
  * RUN
  *   mpirun -np <ranks> ./heat --grid <N> --tol <t> --max-iter <m> [--gpu]
