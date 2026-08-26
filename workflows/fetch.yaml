@@ -2,15 +2,12 @@
 #
 # Prints the solver's one-line JSON record (grid, ranks, iterations, final_l2,
 # converged, wall_seconds, mode, distinct_hosts, hosts) and the remote path of
-# the field dump. Replaces the parsing half of scripts/fetch.sh; each fetch is a
-# logged workflow run.
+# the field dump. Each fetch is a logged workflow run.
 #
 # The field dump stays on the cluster; validate.yaml consumes it there. This
 # workflow only returns the run record. No file transfer, no scp.
 #
 #   pw workflows run -i runs/<id>/fetch.inputs.json --name <id>-fetch runs/<id>/fetch.yaml
-#
-# NOTE: authored to the documented schema, not runtime-verified here.
 
 'on':
   execute:

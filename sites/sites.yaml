@@ -53,19 +53,22 @@
 targets:
 
   # ---- A Slurm cluster, CPU nodes, 2-node run using only 16 ranks/node ----
-  - name: aws-cpu
-    ssh_name: pw://sfgary/aws
+  - name: bigcluster-cpu
+    ssh_name: pw://myuser/bigcluster
     scheduler: slurm
     mode: cpu
-    mpi_ranks: 4
-    mpi_launch: "srun --mpi=pmi2"
+    mpi_ranks: 32
+    mpi_launch: "srun --mpi=pmix"
     env_load:
-      - source /opt/intel/bin/compilervars.sh -arch intel64 -platform linux
+      - module load gcc/12
+      - module load openmpi/4.1
     directives: |
       #SBATCH --job-name=heat_cpu
-      #SBATCH --partition=compute
+      #SBATCH --partition=normal
+      #SBATCH --qos=normal
+      #SBATCH --account=MYPROJECT
       #SBATCH --nodes=2
-      #SBATCH --ntasks-per-node=2
+      #SBATCH --ntasks-per-node=16
       #SBATCH --time=00:30:00
 
   # ---- The SAME cluster, GPU nodes: different partition, QoS, account ----

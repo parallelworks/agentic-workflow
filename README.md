@@ -28,16 +28,14 @@ to make portability and capacity questions concrete.
 In `pw code`, a *custom agent* is a markdown file (`.agents/agents/*.md`) with
 YAML frontmatter and a specialization prompt. There is no orchestrator program —
 coordination happens *inside* `pw code`: the main agent reads each definition's
-`description` and delegates work to the right subagent. This repo ships six:
+`description` and delegates work to the right subagent. This repo ships four:
 
 | Agent | Role |
 |-------|------|
-| `site-runner` | Runs the workload on ONE site (submit / poll / fetch). The cross-site primitive. |
-| `campaign-orchestrator` | Expands a sweep and fans runs across sites. |
-| `portability-analyst` | Same problem on many sites; compares results vs a reference. |
-| `build-engineer` | Diagnostic only; builds to report the toolchain, hands off no binary. |
-| `capacity-analyst` | Read-only; recommends where a job should run. |
-| `results-reviewer` | Read-only; audits completed runs for correctness and multi-node integrity. |
+| `campaign-orchestrator` | The orchestrator: expands a sweep, dispatches runs to site-runner, hands completed runs to the evaluator. |
+| `site-runner` | Runs the workload on ONE target — stages, builds, submits (one workflow), then polls to done. The cross-site primitive. |
+| `evaluator` | After runs finish, fetches + validates on every cluster and analyzes portability (reproducing the solution) and performance (run time) together. |
+| `capacity-analyst` | Read-only; recommends which target a job should run as. |
 
 > Note: this is different from the `orchestrator.py` hub-and-spoke server in the
 > `interactive_session` repo. That is a separate Parallel Works pattern (a chat
@@ -74,7 +72,7 @@ kept for comparison but are no longer used.
 ```
 AGENTS.md                    project instructions pw code reads every session
 .agents/
-  agents/*.md                the six custom agent definitions
+  agents/*.md                the four custom agent definitions
 app/heat/
   heat.c                     the MPI heat solver (equal 1-D slabs, halos over MPI)
   Makefile                   cpu + gpu (OpenACC) build targets
@@ -87,14 +85,14 @@ scripts/
   submit.sh poll.sh fetch.sh capacity.sh   LEGACY pw ssh wrappers (kept for
                              comparison; agents no longer use these)
 workflows/
-  stage/build/submit/poll/fetch/validate/capacity .yaml + .inputs.json
+  run/poll/fetch/validate/capacity .yaml + .inputs.json
                              platform-logged workflow templates (the layer
-                             agents use for every cluster operation). stage =
-                             git clone; validate = validate.py on the cluster.
+                             agents use for every cluster operation). run =
+                             stage+build+submit merged; validate runs on cluster.
 runs/                        per-invocation staging (like plan-mode's ./plans);
                              each run: <agent>-<target>-<NNNNNN>/ (gitignored)
 campaigns/grid-sweep.yaml    an example campaign
-WORKSHOP.md                  facilitator guide: the four exercises, timed
+WORKSHOP.md                  facilitator guide: three exercises, timed
 ```
 
 ## Prerequisites
@@ -143,7 +141,7 @@ WORKSHOP.md                  facilitator guide: the four exercises, timed
 4. **Launch `pw code`** in this workspace and approve the project definitions.
    The agents will stage runs under `./runs/` and drive clusters through
    `pw workflows run` (see `AGENTS.md` for the full procedure).
-5. **Work through `WORKSHOP.md`** — four exercises, one per capability.
+5. **Work through `WORKSHOP.md`** — three exercises across the four agents.
 
 ## The design in one paragraph
 

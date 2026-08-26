@@ -4,7 +4,7 @@
 #   make cpu   -> CPU-only MPI build            (any MPI + C compiler)
 #   make gpu   -> MPI + OpenACC GPU offload     (NVIDIA HPC SDK: mpicc wrapping nvc)
 #
-# The build-engineer agent discovers which of these a given site can produce.
+# site-runner's run workflow builds whichever mode a target declares.
 # On a CPU-only site, `make gpu` is EXPECTED to fail — that failure is a finding,
 # not a bug. See WORKSHOP.md, Exercise 3.
 

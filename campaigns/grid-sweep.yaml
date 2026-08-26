@@ -24,15 +24,15 @@ axes:
   # a gpu target for the same cluster runs both node types — nothing is
   # auto-selected. Comment out any target you don't want in the sweep.
   target:
-    - bigcluster-cpu
-    - bigcluster-gpu
-    - pbscluster-cpu
-    - pbscluster-gpu
+    - pbs-cpu
+    - pbs-gpu
+    - slurm-cpu
+    - slurm-gpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:
 #   "Use the campaign-orchestrator to run campaigns/grid-sweep.yaml, then have
-#    the portability-analyst compare the grid=128 results across the cpu targets."
+#    the evaluator fetch, validate, and compare the grid=128 results."
 #
 # Note there are no node/rank knobs here: those live in each target's definition
 # in sites.yaml, where the verbatim scheduler directives and explicit mpi_ranks

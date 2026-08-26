@@ -66,7 +66,7 @@
  * BUILD
  *   CPU:  mpicc -O3 -o heat heat.c -lm
  *   GPU:  mpicc -O3 -acc -Minfo=accel -o heat_gpu heat.c -lm   (NVIDIA HPC SDK)
- *   (See the Makefile; the build-engineer agent discovers the right toolchain.)
+ *   (See the Makefile; site-runner's run workflow builds the right mode.)
  *
  * RUN
  *   mpirun -np <ranks> ./heat --grid <N> --tol <t> --max-iter <m> [--gpu]
@@ -91,8 +91,9 @@
 #define BOUND_HOT        100.0   /* top edge temperature   */
 #define BOUND_COLD       0.0     /* other edges            */
 
+/* -------- Print error message on all ranks for visibility ------- */
 static void die(int rank, const char *msg) {
-    if (rank == 0) fprintf(stderr, "heat: %s\n", msg);
+    fprintf(stderr, "heat: [rank %d] %s\n", rank, msg); fflush(stderr);
     MPI_Abort(MPI_COMM_WORLD, 1);
 }
 

@@ -3,11 +3,9 @@
 # The result field stays on the cluster. This workflow runs validate.py there,
 # comparing the run's field dump against the reference delivered by the git clone,
 # and prints the verdict JSON (relative L2, pass/fail) into the run record. No
-# file comes back. Replaces the old scp-the-field-back-and-validate-locally step.
+# file comes back.
 #
 #   pw workflows run -i runs/<id>/validate.inputs.json --name <id>-validate runs/<id>/validate.yaml
-#
-# NOTE: authored to the documented schema, not runtime-verified here.
 
 'on':
   execute:

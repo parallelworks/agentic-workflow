@@ -1,14 +1,11 @@
 # capacity.yaml — snapshot a cluster's queue depth and free nodes.
 #
 # Runs read-only scheduler queries ON the remote cluster (via the job's ssh
-# block) and prints one JSON line. Replaces scripts/capacity.sh, but every
-# invocation is now a platform-logged workflow run.
+# block) and prints one JSON line. Every invocation is a platform-logged 
+# workflow run.
 #
 # Run it (the capacity-analyst agent does this):
 #   pw workflows run -i runs/<id>/inputs.json --name <id> runs/<id>/capacity.yaml
-#
-# NOTE: authored to the documented ACTIVATE YAML schema but not runtime-verified
-# here. Validate in your environment with `pw workflows run --dry-run` first.
 
 'on':
   execute:

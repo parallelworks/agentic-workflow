@@ -20,6 +20,7 @@ results/*
 # Python
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
 
 # Secrets — never commit credentials (reinforces the AGENTS.md security policy)
 .env

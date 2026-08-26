@@ -36,38 +36,41 @@ The main agent coordinates a team of custom agents defined in
 definition's `description` — so the authoritative statement of what each agent
 does lives in its definition file, not here (kept in one place on purpose).
 Delegate to the right specialist rather than doing its job yourself; steer
-explicitly when useful ("use the portability-analyst to compare these runs").
+explicitly when useful ("use the evaluator to compare these runs").
 
-NO SHARED CLUSTER STATE BETWEEN AGENTS. Each agent works in its own run-scoped
-remote directory (`$HOME/pw-heat/<agent>-<target>-<NNNNNN>/`) and never reuses
-another agent's built binary. site-runner builds its own binary as part of its
-run; build-engineer builds only to DIAGNOSE the toolchain and hands off nothing.
-The solver compiles in seconds, so this duplication is deliberate — it keeps
-agents decoupled and avoids any "did the other agent's build land where I look?"
-coupling. Do not add a cross-agent binary handoff.
+CLUSTER STATE BETWEEN AGENTS. site-runner builds its own binary as part of its
+run (stage+build+submit in one workflow); the solver compiles in seconds, so
+that is cheap and self-contained. The evaluator does NOT run its own job — it
+reads the results site-runner already produced, so when the evaluator fetches
+and validates it uses SITE-RUNNER's run id and remote dir
+(`$HOME/pw-heat/site-runner-<target>-<NNNNNN>/`), where the field dump waits
+under `app/heat/out/`. That is the one intended cross-agent read: the evaluator
+consumes site-runner's output, it does not rebuild or resubmit. No agent reuses
+another's built binary to run a new job.
 
 ## How agents run things on a cluster (READ THIS)
 
-**One channel reaches a cluster: `pw workflows run`.** Every operation — stage
-(git clone), build, submit, poll, fetch-status, validate, capacity — runs as a
-platform-logged workflow from the `./workflows/` templates. There is no `scp`
+**One channel reaches a cluster: `pw workflows run`.** Every operation — run
+(git clone + build + submit, merged), poll, fetch, validate, capacity — runs as
+a platform-logged workflow from the `./workflows/` templates. There is no `scp`
 and no `pw ssh <command>`: agents never move files by hand and never touch SSH
-keys. Source arrives on the cluster by the stage workflow cloning the repo;
-results stay on the cluster and a validate workflow returns only the verdict.
+keys. Source arrives on the cluster inside the run workflow (its first step git-
+clones the repo); results stay on the cluster and the validate workflow returns
+only the verdict.
 This keeps every cluster action logged and keeps agents clear of the secrets
 policy.
 
 ### Getting source onto the cluster (git clone, no file transfer)
 
 The solver source, Makefile, validate.py, and the reference field all reach the
-cluster together when the stage workflow clones this repository there. The agent
-autodetects what to clone from its own working copy:
+cluster together when the run workflow's first step clones this repository there.
+The agent autodetects what to clone from its own working copy:
 
 - URL:    `git remote get-url origin`
 - commit: `git rev-parse HEAD`
 
 Both are workflow inputs, so the user may override URL/branch/commit when needed.
-The stage workflow clones the URL and checks out the exact commit, so the cluster
+The run workflow clones the URL and checks out the exact commit, so the cluster
 runs precisely the code the agent introspected (provenance by SHA).
 
 ASSUMPTION: the repository is public, so the clone needs no credentials on the
@@ -96,24 +99,37 @@ there is a durable record of exactly what was run.
 
 ### The end-to-end run procedure (a cluster job)
 
-1. Resolve the id and `mkdir -p ./runs/<id>/`; copy in the op template(s).
+site-runner does the RUN and POLL; the evaluator does the FETCH and VALIDATE
+afterward. Both stage local artifacts under `./runs/<id>/` with their own id.
+
+site-runner, for a target + grid:
+
+1. Resolve the id `site-runner-<target>-<NNNNNN>` and `mkdir -p ./runs/<id>/`;
+   copy in `run.yaml` and `poll.yaml` (+ their inputs).
 2. Derive from the target: full URI (`ssh_name`) for the `cluster` input,
-   `scheduler`, `mode`, `mpi_ranks`, `mpi_launch`, env_load commands, and — for
-   submit — the base64 of the `directives` block. Produce the base64 with
-   `_site_query.py sites/sites.yaml <target> directives | base64 -w0` (this reads
-   the verbatim block; base64 keeps it a single safe token). Get the env_load
-   value (verbatim setup commands joined with &&, no prefixing) with
-   `_site_query.py sites/sites.yaml <target> env_load_joined`. Autodetect the
-   repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
-3. Fill `./runs/<id>/<op>.inputs.json`.
-4. STAGE the source: run `stage.yaml` (git clone + checkout the commit into
-   `$HOME/pw-heat/<id>/`). Then `build.yaml`, then `submit.yaml`.
-5. `pw workflows run -i runs/<id>/<op>.inputs.json --name <id> runs/<id>/<op>.yaml`
-   (append a distinct suffix like `<id>-poll` for repeated polls).
-6. RESULTS: after the job completes, run `validate.yaml` on the cluster. It runs
-   validate.py against the delivered reference and returns the verdict (relative
-   L2, pass/fail) in the run record. The field file stays on the cluster. Save
-   the returned verdict JSON to `./results/<id>/verdict.json`.
+   `scheduler`, `mode`, `mpi_ranks`, `mpi_launch`, env_load, and the base64 of
+   the `directives` block. Produce the base64 with
+   `_site_query.py sites/sites.yaml <target> directives | base64 -w0`, and the
+   env_load with `_site_query.py sites/sites.yaml <target> env_load_joined`.
+   Autodetect repo URL (`git remote get-url origin`) and commit
+   (`git rev-parse HEAD`). Set `remote_dir` to `pw-heat/<id>` (RELATIVE; the
+   workflow anchors it to `$HOME`).
+3. Fill `./runs/<id>/run.inputs.json`, then RUN (stage+build+submit in one):
+   `pw workflows run -i runs/<id>/run.inputs.json --name <id> runs/<id>/run.yaml`.
+   Capture the scheduler `job_id`.
+4. POLL: `pw workflows run -i runs/<id>/poll.inputs.json --name <id>-poll-N
+   runs/<id>/poll.yaml` until state is DONE.
+
+the evaluator, once site-runner reports a run is DONE, for each such run:
+
+5. Stage `./runs/evaluator-<target>-<NNNNNN>/` with `fetch.yaml` + `validate.yaml`.
+   IMPORTANT: set `remote_dir` to SITE-RUNNER's dir — `pw-heat/site-runner-<target>-<NNNNNN>`
+   — because that is where the field dump and run record live. The evaluator
+   reads site-runner's output; it does not rebuild.
+6. FETCH: run `fetch.yaml` (`--name evaluator-...-fetch`) for the JSON run record.
+   VALIDATE: run `validate.yaml` (`--name evaluator-...-validate`); it runs
+   validate.py on the cluster against the delivered reference and returns the
+   verdict (relative L2, pass/fail). Save it to `./results/<id>/verdict.json`.
 
 Keep `./runs/` artifacts; they are the audit trail. (`./scripts/` still exists
 for comparison with the pre-workflow approach, but agents no longer use it.)
