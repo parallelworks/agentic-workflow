@@ -91,8 +91,9 @@
 #define BOUND_HOT        100.0   /* top edge temperature   */
 #define BOUND_COLD       0.0     /* other edges            */
 
+/* -------- Print error message on all ranks for visibility ------- */
 static void die(int rank, const char *msg) {
-    if (rank == 0) fprintf(stderr, "heat: %s\n", msg);
+    fprintf(stderr, "heat: [rank %d] %s\n", rank, msg); fflush(stderr);
     MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
