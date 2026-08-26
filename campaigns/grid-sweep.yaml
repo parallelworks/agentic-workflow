@@ -24,10 +24,10 @@ axes:
   # a gpu target for the same cluster runs both node types — nothing is
   # auto-selected. Comment out any target you don't want in the sweep.
   target:
-    - bigcluster-cpu
-    - bigcluster-gpu
-    - pbscluster-cpu
-    - pbscluster-gpu
+    - pbs-cpu
+    - pbs-gpu
+    - slurm-cpu
+    - slurm-gpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:
