@@ -1,6 +1,5 @@
 {
   "permissionMode": "accept-edits",
-  "allowedTools": ["Bash(pw workflow run:*)"],
   "subagentDepth": 2,
   "subagentConcurrency": 10
 }
