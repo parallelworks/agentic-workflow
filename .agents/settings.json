@@ -1,0 +1,6 @@
+{
+  "permissionMode": "accept-edits",
+  "subagentDepth": 2,
+  "subagentConcurrency": 10
+}
+

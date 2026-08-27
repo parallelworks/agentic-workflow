@@ -1,7 +1,7 @@
 ---
 name: campaign-orchestrator
 description: Orchestrates a simulation campaign across the fleet — expands a sweep (grid sizes, targets) into individual runs, dispatches each to site-runner, then hands the completed runs to the evaluator for portability and performance analysis. Use to run "the same study across the fleet" or to execute a campaign file.
-tools: ReadFile, GlobSearch, Bash
+tools: ReadFile, GlobSearch, Bash, Task
 permissionMode: accept-edits
 color: blue
 maxTurns: 80

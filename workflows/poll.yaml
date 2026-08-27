@@ -43,7 +43,7 @@ jobs:
               *)                   emit "UNKNOWN" "$RAW";;
             esac
           elif [ "$SCHED" = "pbs" ]; then
-            RAW="$(qstat -f "$JOBID" 2>/dev/null | awk -F= '/job_state/{gsub(/ /,\"\",$2);print $2}' || true)"
+            RAW="$(qstat -f "$JOBID" 2>/dev/null | awk -F= '/job_state/{gsub(/ /, "", $2); print $2}' || true)"
             if [ -z "$RAW" ]; then emit "DONE" ""; exit 0; fi
             case "$RAW" in
               Q|H) emit "PENDING" "$RAW";;

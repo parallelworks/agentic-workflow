@@ -37,11 +37,6 @@ coordination happens *inside* `pw code`: the main agent reads each definition's
 | `evaluator` | After runs finish, fetches + validates on every cluster and analyzes portability (reproducing the solution) and performance (run time) together. |
 | `capacity-analyst` | Read-only; recommends which target a job should run as. |
 
-> Note: this is different from the `orchestrator.py` hub-and-spoke server in the
-> `interactive_session` repo. That is a separate Parallel Works pattern (a chat
-> model that reaches per-cluster worker agents over HTTP). This workshop uses
-> pure `pw code` custom agents.
-
 ## How agents reach clusters
 
 **One channel: platform-logged workflows.** Every cluster operation — stage
@@ -111,13 +106,6 @@ WORKSHOP.md                  facilitator guide: three exercises, timed
   ladder).
 - An MPI toolchain on each cluster (any MPI + C compiler for CPU; the NVIDIA HPC
   SDK for the GPU build). The build runs on the cluster via a workflow.
-
-> **Not runtime-verified here.** The heat solver itself was compiled and run
-> (fields match bit-for-bit across rank counts), but the workflow YAML/JSON in
-> `./workflows/` were authored to the documented ACTIVATE schema and validated
-> for syntax — they have **not** been executed against a live platform in this
-> repo's construction. Do a `pw workflows run --dry-run` pass on each before the
-> workshop.
 
 ## Quick start
 

@@ -19,7 +19,7 @@ solver:
 
 # Sweep axes: the cross product of these is the run list.
 axes:
-  grid: [128, 256]
+  grid: [128]
   # Target names must match entries in sites/sites.yaml. Listing both a cpu and
   # a gpu target for the same cluster runs both node types — nothing is
   # auto-selected. Comment out any target you don't want in the sweep.
