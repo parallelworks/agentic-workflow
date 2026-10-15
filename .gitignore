@@ -9,6 +9,7 @@ runs/*
 
 results/*
 !results/.gitkeep
+!results/agent-summary.md
 
 # Rendered job scripts land under results/ too
 *.sbatch
