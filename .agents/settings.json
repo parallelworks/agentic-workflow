@@ -1,6 +1,21 @@
 {
   "permissionMode": "accept-edits",
   "subagentDepth": 2,
-  "subagentConcurrency": 10
+  "subagentConcurrency": 10,
+  "hooks": {
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 -I .agents/hooks/agent_digest.py", "timeout": 30 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 -I .agents/hooks/agent_digest.py", "timeout": 30 }
+        ]
+      }
+    ]
+  }
 }
-

@@ -17,6 +17,9 @@ results/*
 # Scratch directive files rendered under results/
 *.directives
 
+# The sites.yaml with potentially private information
+sites/sites.yaml
+
 # Python
 __pycache__/
 *.pyc

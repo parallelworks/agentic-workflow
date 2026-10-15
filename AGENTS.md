@@ -38,14 +38,32 @@ does lives in its definition file, not here (kept in one place on purpose).
 Delegate to the right specialist rather than doing its job yourself; steer
 explicitly when useful ("use the evaluator to compare these runs").
 
-CLUSTER STATE BETWEEN AGENTS. site-runner builds its own binary as part of its
+TWO RUN AGENTS, ONE DEFAULT. Both do the same work (same `run.yaml`, same
+inputs resolved through `scripts/_site_query.py`) and differ only in HOW the run
+is invoked:
+- `site-runner-mcp` — the DEFAULT. Uses two MCP tools (`.agents/mcp/heat_server.py`,
+  scoped to this agent only): `run_heat` stages, builds and submits in code;
+  `poll_heat` runs `poll.yaml` until the job is DONE. No shell at all.
+- `site-runner` — the comparison baseline; builds the `pw workflows run` invocation
+  in shell. Use it ONLY when the user names it explicitly.
+ROUTING RULE: send any run request to `site-runner-mcp` unless `site-runner` is
+named. One intentional difference: `run_heat` rejects `grid < mpi_ranks` up front
+(no job submitted); the shell path would submit a job that MPI_Aborts.
+
+TWO HYPOTHESES, TWO AGENTS. The `evaluator` tests the APPLICATION across a
+site-to-site change (portability, performance). `compare-agents` tests the RUN
+AGENTS across a model-to-model change (parity of staged work, actions, results,
+cost). It runs post-hoc, after all model switching is done, and is kept separate
+from `campaign-orchestrator`, which needs one model for a whole campaign.
+
+CLUSTER STATE BETWEEN AGENTS. The run agent builds its own binary as part of its
 run (stage+build+submit in one workflow); the solver compiles in seconds, so
 that is cheap and self-contained. The evaluator does NOT run its own job — it
-reads the results site-runner already produced, so when the evaluator fetches
-and validates it uses SITE-RUNNER's run id and remote dir
-(`$HOME/pw-heat/site-runner-<target>-<NNNNNN>/`), where the field dump waits
+reads the results the run agent already produced, so when the evaluator fetches
+and validates it uses the RUN AGENT's run id and remote dir
+(`$HOME/pw-heat/<run-agent>-<target>-<NNNNNN>/`), where the field dump waits
 under `app/heat/out/`. That is the one intended cross-agent read: the evaluator
-consumes site-runner's output, it does not rebuild or resubmit. No agent reuses
+consumes the run agent's output, it does not rebuild or resubmit. No agent reuses
 another's built binary to run a new job.
 
 ## How agents run things on a cluster (READ THIS)
@@ -99,10 +117,10 @@ there is a durable record of exactly what was run.
 
 ### The end-to-end run procedure (a cluster job)
 
-site-runner does the RUN and POLL; the evaluator does the FETCH and VALIDATE
+The run agent does the RUN and POLL; the evaluator does the FETCH and VALIDATE
 afterward. Both stage local artifacts under `./runs/<id>/` with their own id.
 
-site-runner, for a target + grid:
+site-runner (the shell path), for a target + grid:
 
 1. Resolve the id `site-runner-<target>-<NNNNNN>` and `mkdir -p ./runs/<id>/`;
    copy in `run.yaml` and `poll.yaml` (+ their inputs).
@@ -120,12 +138,20 @@ site-runner, for a target + grid:
 4. POLL: `pw workflows run -i runs/<id>/poll.inputs.json --name <id>-poll-N
    runs/<id>/poll.yaml` until state is DONE.
 
-the evaluator, once site-runner reports a run is DONE, for each such run:
+MCP PATH: site-runner-mcp's `run_heat` call performs steps 1–3 in code (id
+`site-runner-mcp-<target>-<NNNNNN>`, same staging layout, plus `submit.json` and
+`rpc.jsonl` as its action record); `poll_heat` performs step 4 (same `poll.yaml`,
+one logged run per poll, recorded in `polls.jsonl`). Note `pw workflows run`
+returns as soon as a run is created; a poll's state line is only visible via
+`pw workflows runs logs <slug>`.
+
+the evaluator, once the run agent reports a run is DONE, for each such run:
 
 5. Stage `./runs/evaluator-<target>-<NNNNNN>/` with `fetch.yaml` + `validate.yaml`.
-   IMPORTANT: set `remote_dir` to SITE-RUNNER's dir — `pw-heat/site-runner-<target>-<NNNNNN>`
-   — because that is where the field dump and run record live. The evaluator
-   reads site-runner's output; it does not rebuild.
+   IMPORTANT: set `remote_dir` to the RUN AGENT's dir — `pw-heat/<run-id>`, e.g.
+   `pw-heat/site-runner-mcp-<target>-<NNNNNN>` — because that is where the field
+   dump and run record live. The evaluator reads the run agent's output; it does
+   not rebuild.
 6. FETCH: run `fetch.yaml` (`--name evaluator-...-fetch`) for the JSON run record.
    VALIDATE: run `validate.yaml` (`--name evaluator-...-validate`); it runs
    validate.py on the cluster against the delivered reference and returns the
@@ -133,6 +159,41 @@ the evaluator, once site-runner reports a run is DONE, for each such run:
 
 Keep `./runs/` artifacts; they are the audit trail. (`./scripts/` still exists
 for comparison with the pre-workflow approach, but agents no longer use it.)
+
+SETUP FOR THE MCP AGENT: approve Workspace Trust at the first `pw code` launch,
+or `site-runner-mcp` and its server do not load (`-p` runs silently skip
+unapproved config). Pre-approve its tools for one-shot runs:
+`--allowedTools mcp__heat__run_heat --allowedTools mcp__heat__poll_heat`.
+SESSION DIGESTS: `SubagentStop`/`SessionEnd` hooks in `.agents/settings.json`
+run `.agents/hooks/agent_digest.py`, which writes a redacted
+`runs/<run-id>/agent-digest.json` (tokens, model, turns, tool-call sequence; no
+message text) for each run a session created. Enable once with `/hooks trust`.
+compare-agents reads these digests; no agent reads the pw code session store.
+SETUP FOR THE SHELL AGENT: `-p` runs auto-deny unapproved shell commands, so a
+one-shot site-runner run needs its commands pre-approved on the command line
+(`--allowedTools` is per launch; nothing is stored):
+  pw code -p "Use site-runner to run the heat job on target <t> with grid <g>." \
+    --agent site-runner -o json \
+    --allowedTools 'Bash(pw workflows run:*)' --allowedTools 'Bash(pw workflows runs:*)' \
+    --allowedTools 'Bash(python3 scripts/_site_query.py:*)' \
+    --allowedTools 'Bash(git remote get-url:*)' --allowedTools 'Bash(git rev-parse:*)' \
+    --allowedTools 'Bash(mkdir -p:*)' \
+    --allowedTools 'Bash(cp workflows/run.yaml:*)' --allowedTools 'Bash(cp workflows/poll.yaml:*)' \
+    --allowedTools 'Bash(cp workflows/run.inputs.json:*)' --allowedTools 'Bash(cp workflows/poll.inputs.json:*)' \
+    --allowedTools 'Bash(ls:*)' --allowedTools 'Bash(base64:*)' --allowedTools 'Bash(sleep:*)'
+A rule's fixed part must end on a WHOLE WORD (tested on pw v7.122):
+`Bash(mkdir -p runs/:*)` does NOT match `mkdir -p runs/x`, while `Bash(mkdir -p:*)`
+and `Bash(cp workflows/poll.yaml:*)` match. Name whole template files rather than
+allowing all of `cp` (which could copy credentials into the workspace). Every part
+of a `&&`/`|` compound must match a rule. `sleep` lets it
+space polls (poll_heat waits server-side); `pw workflows runs` lets it read a
+poll's state line from the run logs.
+Hooks as of pw v7.122: interactive sessions fire SessionEnd; one-shot `-p` runs
+fire SubagentStop for a DELEGATED agent (so a run requested through the main
+session gets its digest) but never SessionEnd (so `--agent` runs do not). After a
+`-p --agent` run the HUMAN backfills the digest with `python3 -I .agents/hooks/agent_digest.py --transcript
+~/.local/state/pw/code-sessions/<session_id>.jsonl` (session_id is in `-o json`).
+`runs/_mcp/hooks.jsonl` gets one line each time a hook actually fires.
 
 ## Targets, not clusters
 

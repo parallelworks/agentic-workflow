@@ -15,6 +15,9 @@ Do this in advance — it is where workshops actually go wrong:
       it's read-only and confirms the ssh/compute-clusters wiring end to end.
 - [ ] This repo is **pushed to a public git remote** and `git` is available on
       the clusters (the stage workflow clones it there).
+- [ ] `sites/sites.yaml` exists. It is git-ignored so private cluster details
+      stay out of the repo; create it with
+      `cp sites/sites.yaml.template sites/sites.yaml`, then edit it.
 - [ ] `sites/sites.yaml` defines your real **targets**: each target's `ssh_name`
       as a PW URI (`pw://<user>/<cluster>`), scheduler, mode, explicit
       `mpi_ranks`, and its verbatim `directives` block. The submit workflow

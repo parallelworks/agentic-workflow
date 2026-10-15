@@ -28,14 +28,16 @@ to make portability and capacity questions concrete.
 In `pw code`, a *custom agent* is a markdown file (`.agents/agents/*.md`) with
 YAML frontmatter and a specialization prompt. There is no orchestrator program —
 coordination happens *inside* `pw code`: the main agent reads each definition's
-`description` and delegates work to the right subagent. This repo ships four:
+`description` and delegates work to the right subagent. This repo ships six:
 
 | Agent | Role |
 |-------|------|
-| `campaign-orchestrator` | The orchestrator: expands a sweep, dispatches runs to site-runner, hands completed runs to the evaluator. |
-| `site-runner` | Runs the workload on ONE target — stages, builds, submits (one workflow), then polls to done. The cross-site primitive. |
+| `campaign-orchestrator` | The orchestrator: expands a sweep, dispatches runs to site-runner-mcp (default run agent), hands completed runs to the evaluator. |
+| `site-runner-mcp` | DEFAULT run agent. Same job as site-runner, but uses two typed MCP tools (`run_heat`, `poll_heat` in `.agents/mcp/heat_server.py`) instead of shell-built commands. |
+| `site-runner` | Runs the workload on ONE target — stages, builds, submits (one workflow), then polls to done. Kept as the shell-built baseline; used only when named. |
 | `evaluator` | After runs finish, fetches + validates on every cluster and analyzes portability (reproducing the solution) and performance (run time) together. |
 | `capacity-analyst` | Read-only; recommends which target a job should run as. |
+| `compare-agents` | Post-hoc: compares site-runner-mcp with site-runner for the same job (parity, actions, results, cost) across model switches. |
 
 ## How agents reach clusters
 
@@ -67,14 +69,19 @@ kept for comparison but are no longer used.
 ```
 AGENTS.md                    project instructions pw code reads every session
 .agents/
-  agents/*.md                the four custom agent definitions
+  agents/*.md                the six custom agent definitions
+  mcp/heat_server.py         stdlib-only MCP server: run_heat + poll_heat (see .agents/mcp/README.md)
+  mcp/_site_query.py         protected copy the server runs; must match scripts/_site_query.py
+  hooks/agent_digest.py      hook: redacted per-run session digest for compare-agents
 app/heat/
   heat.c                     the MPI heat solver (equal 1-D slabs, halos over MPI)
   Makefile                   cpu + gpu (OpenACC) build targets
   validate.py                compares a run's field to the reference (L2 norm)
   reference/heat_128.ref     golden reference field for grid 128
 sites/
-  sites.yaml                 THE fleet registry (list of targets) — edit first
+  sites.yaml.template        example fleet registry — copy to sites.yaml
+  sites.yaml                 THE fleet registry (list of targets) — your copy,
+                             git-ignored so private cluster details stay local
   slurm/ , pbs/              LEGACY submit templates + env.sh per scheduler
 scripts/
   submit.sh poll.sh fetch.sh capacity.sh   LEGACY pw ssh wrappers (kept for
@@ -109,7 +116,10 @@ WORKSHOP.md                  facilitator guide: three exercises, timed
 
 ## Quick start
 
-1. **Edit `sites/sites.yaml`** to describe your actual **targets**. A target is
+1. **Create and edit `sites/sites.yaml`** to describe your actual **targets**.
+   It is git-ignored (it holds your user name, cluster names and paths), so start
+   from the committed example: `cp sites/sites.yaml.template sites/sites.yaml`.
+   Everything reads `sites/sites.yaml`; the template is never used. A target is
    one way to run on a cluster: its `ssh_name` is the cluster's PW URI
    (`pw://<user>/<cluster>`), and its `directives` block holds the literal
    #SBATCH/#PBS lines that cluster needs (partition, QoS, account, walltime,
