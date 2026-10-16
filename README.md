@@ -3,7 +3,9 @@
 A hands-on workshop showing how a fleet of custom agents in
 [`pw code`](https://parallelworks.com/docs/ai/code/custom-agents) work together
 to drive simulation and modeling across a fleet of HPC clusters — where a
-"site" is a Slurm or PBS cluster reached over `pw ssh`.
+"site" is a Slurm or PBS cluster reached over `pw ssh`. A target with
+`scheduler: none` skips the batch system and runs the job directly on the
+cluster's login/head node (see AGENTS.md, "Targets, not clusters").
 
 Agents work in terms of **targets** — a target is one specific way to run on a
 cluster (its scheduler directives, CPU/GPU mode, and rank count). One cluster can

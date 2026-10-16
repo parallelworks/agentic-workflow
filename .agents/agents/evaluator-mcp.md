@@ -41,6 +41,8 @@ pass validation yet FAIL integrity: the solution is the same at any rank count, 
 a job whose directives were ignored still validates. `checks.nodes.ok` null means
 the node count was not checked (its directives use a form the tool does not read);
 say so, and use `directives` and `record.distinct_hosts` to judge it yourself.
+For a `scheduler: none` run (no scheduler, run on the login node) the tool
+expects exactly 1 host.
 Different `commit`s across compared runs undermine a portability claim; flag that.
 
 PERFORMANCE: compare `record.wall_seconds` only between runs with overall PASS,

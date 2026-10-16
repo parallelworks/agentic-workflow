@@ -35,7 +35,10 @@ Follow the run procedure in AGENTS.md. In brief, for a target + grid:
    `python3 scripts/_site_query.py sites/sites.yaml <target> env_load_joined`
    Never retype or copy the directives by hand, and never encode them from a
    file you wrote. Autodetect the repo URL (`git remote get-url origin`) and
-   commit (`git rev-parse HEAD`).
+   commit (`git rev-parse HEAD`). If the target's scheduler is `none` (no
+   scheduler; the job runs on the login node), also run
+   `python3 scripts/_site_query.py sites/sites.yaml <target> timeout` and, if it
+   prints a value, add it as `"timeout"` in `run.inputs.json`.
 3. RUN (stage + build + submit, one workflow):
    `pw workflows run -i runs/<id>/run.inputs.json --name <id> runs/<id>/run.yaml`.
    This git-clones the repo into `$HOME/pw-heat/<id>/` on the cluster, compiles

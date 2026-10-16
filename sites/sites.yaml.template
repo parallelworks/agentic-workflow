@@ -30,7 +30,15 @@
 #                   Used as the workflow `compute-clusters` input. Targets may
 #                   share one URI (same cluster, different ways to run).
 #                   You write the URI explicitly; it is not auto-generated.
-#   scheduler     : slurm | pbs   (selects directive prefix + submit/poll verbs)
+#   scheduler     : slurm | pbs | none   (selects directive prefix + submit/poll
+#                   verbs). none = NO scheduler: the job runs in the foreground
+#                   on the cluster's login/head node (the node `ssh_name`
+#                   reaches), under `timeout`. Use it where running there is
+#                   allowed (e.g. a cloud cluster whose head node is yours alone,
+#                   possibly with GPUs); many shared HPC sites forbid it.
+#                   With no scheduler, OpenMPI counts physical cores as slots
+#                   and refuses more ranks; put `--use-hwthread-cpus` or
+#                   `--oversubscribe` in mpi_launch if you need more.
 #   mode          : cpu | gpu     (gpu binds ranks to devices; nothing auto)
 #   mpi_ranks     : integer, ranks the solver runs (explicit, never inferred)
 #   gpus_per_node : integer, gpu targets only (rank->device binding)
@@ -43,6 +51,11 @@
 #   directives    : VERBATIM scheduler lines, injected as-is into the job script.
 #                   Include EVERYTHING the scheduler needs: nodes/tasks/select,
 #                   partition/queue, account, QoS, walltime, constraints, GPUs.
+#                   For scheduler none: REQUIRED, '#' comment lines only, e.g.
+#                   `# NO SCHEDULER - directive placeholder`; written at the top
+#                   of the rendered job.sh, which helps when debugging.
+#   timeout       : scheduler none only, optional: the run's time limit, as
+#                   seconds or "[[HH:]MM:]SS" (quote it), default "00:10:00".
 #
 # ---------------------------------------------------------------------------
 # The examples below are realistic placeholders. Replace them with your real
@@ -125,3 +138,17 @@ targets:
       #PBS -A MYPROJECT-GPU
       #PBS -l select=1:ncpus=8:mpiprocs=2:ngpus=2
       #PBS -l walltime=00:20:00
+
+  # ---- No scheduler: the SAME cluster's login/head node runs the job itself ----
+  - name: bigcluster-login
+    ssh_name: pw://myuser/bigcluster
+    scheduler: none
+    mode: cpu
+    mpi_ranks: 8
+    mpi_launch: "mpirun"
+    timeout: "00:10:00"
+    env_load:
+      - module load gcc/12
+      - module load openmpi/4.1
+    directives: |
+      # NO SCHEDULER - directive placeholder

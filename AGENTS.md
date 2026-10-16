@@ -294,6 +294,21 @@ cpu-mode target and a gpu-mode target — with completely different scheduler
 directives. Each target carries a VERBATIM block of #SBATCH/#PBS lines that the
 tooling injects untouched, plus an explicit `mpi_ranks` and `mode`.
 
+`scheduler: none` is a target with NO batch system: `run.yaml` runs the job in
+the foreground on the node the target's `ssh_name` reaches (the login/head
+node), under the target's `timeout` (default 00:10:00), with `<mpi_launch> -np
+<mpi_ranks>`. Its directives are REQUIRED but are `#` comment lines only (e.g.
+`# NO SCHEDULER - directive placeholder`). Everything else is the same: the run
+prints `SUBMITTED scheduler=none job_id=<host>:<pid>` once launched, `poll.yaml`
+reports RUNNING until the process exits and then DONE, and fetch/validate are
+unchanged. cpu and gpu modes and any `mpi_ranks` are allowed (a cloud head node
+may be yours alone, with GPUs). A none run uses exactly 1 host. Launcher flags
+are the target's: OpenMPI counts physical cores as slots, so a target that
+needs more ranks puts `--use-hwthread-cpus` or `--oversubscribe` in `mpi_launch`. For such a target
+the run agent adds `timeout` to `run.inputs.json` from
+`python3 scripts/_site_query.py sites/sites.yaml <target> timeout` (only when
+that prints a value).
+
 ## Ground rules
 
 - Reach a target's cluster via `pw ssh <ssh_name>`. There is no inbound-port

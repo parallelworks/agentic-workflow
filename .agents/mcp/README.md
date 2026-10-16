@@ -18,6 +18,14 @@ served is absent from `tools/list` and refused by `tools/call` (`-32602`).
 It returns right after the submit step finishes, with the run id and the scheduler
 job id. It never waits for the job itself.
 
+For a `scheduler: none` target (no batch system; `run.yaml` runs the job in the
+foreground on the login node under the target's `timeout`), `run_heat` first
+rejects directives that are not `#` comment lines only and a malformed
+`timeout`, adds `timeout` to `run.inputs.json`, and returns as soon as the run's
+log shows `SUBMITTED scheduler=none job_id=<host>:<pid>`, while the workflow is
+still running the job. `poll_heat` then reports RUNNING until that process
+exits, and `evaluate_run` expects exactly 1 host.
+
 **`poll_heat(run_id)`** runs the unmodified `workflows/poll.yaml`, one logged
 workflow run per poll named `<run_id>-poll-<N>`, spaced 30 s apart. It reads the
 state line from the poll's log and returns as soon as the job has left the queue

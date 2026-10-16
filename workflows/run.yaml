@@ -12,6 +12,12 @@
 # The agent autodetects repo_url (git remote get-url origin) and commit
 # (git rev-parse HEAD); both are inputs the user may override. Directives arrive
 # base64-encoded (a single safe token); the solver runs exactly mpi_ranks ranks.
+#
+# scheduler none: no batch system. The Submit step runs the job in the
+# foreground on the node the workflow's SSH session reached (the cluster's
+# login/head node), under `timeout`, and prints the same "SUBMITTED ... job_id="
+# line once it is launched (job_id is <host>:<pid>). The directives block must
+# be comment lines only; it is written at the top of the rendered job.sh.
 
 'on':
   execute:
@@ -33,7 +39,7 @@
         type: string
         optional: false
       scheduler:
-        label: Scheduler (slurm|pbs)
+        label: Scheduler (slurm|pbs|none; none runs on the login node, no scheduler)
         type: string
         optional: false
       mode:
@@ -65,9 +71,13 @@
         type: string
         optional: true
       directives_b64:
-        label: Verbatim scheduler directives block, base64-encoded
+        label: Verbatim scheduler directives block, base64-encoded (for scheduler none, comment lines only)
         type: string
         optional: false
+      timeout:
+        label: For scheduler none only, the run's time limit as seconds or [[HH:]MM:]SS (default 00:10:00)
+        type: string
+        optional: true
 
 jobs:
   run:
@@ -152,6 +162,48 @@ jobs:
             } > "$SCRIPT"
             echo "== rendered $SCRIPT =="; cat "$SCRIPT"
             JOBID="$(qsub "$SCRIPT" | tr -dc '0-9.')"
+          elif [ "$SCHED" = "none" ]; then
+            # No scheduler: run in the foreground on the node this SSH session
+            # reached (the cluster's login/head node), under a time limit. The
+            # directives must be comment lines only (a placeholder that names the
+            # target as scheduler-less in the rendered script).
+            DIRECTIVES="$(echo "${{ inputs.directives_b64 }}" | base64 -d)"
+            if [ -z "$(printf '%s' "$DIRECTIVES" | tr -d '[:space:]')" ] \
+               || printf '%s\n' "$DIRECTIVES" | grep -v '^#' >/dev/null; then
+              echo "submit: scheduler none needs directives that are '#' comment lines only, e.g. '# NO SCHEDULER - directive placeholder'" >&2
+              exit 2
+            fi
+            TO="${{ inputs.timeout }}"; [ -n "$TO" ] || TO=00:10:00
+            case "$TO" in
+              *[!0-9:]*|:*|*:|*::*) echo "submit: invalid timeout '$TO' (want seconds or [[HH:]MM:]SS)" >&2; exit 2;;
+            esac
+            SECS=0; IFS=: read -r -a PARTS <<< "$TO"
+            for P in "${PARTS[@]}"; do SECS=$((SECS * 60 + 10#$P)); done
+            if [ "$SECS" -lt 1 ]; then echo "submit: timeout '$TO' is zero" >&2; exit 2; fi
+            TAG="$(date +%s)"
+            SCRIPT=job.sh
+            {
+              echo '#!/bin/bash'
+              printf '%s\n' "$DIRECTIVES"
+              echo "# run on $(hostname) with timeout $TO (${SECS}s)"
+              echo 'set -euo pipefail'
+              echo '{ ${{ inputs.env_load }} ; } 2>/dev/null || true'
+              echo "${{ inputs.mpi_launch }} -np ${{ inputs.mpi_ranks }} $BIN --grid ${{ inputs.grid }} --tol ${{ inputs.tol }} --max-iter ${{ inputs.max_iter }} $GPU_FLAG --dump out/field_${TAG}.txt"
+            } > "$SCRIPT"
+            echo "== rendered $SCRIPT =="; cat "$SCRIPT"
+            timeout "$SECS" bash "$SCRIPT" > "out/heat_${TAG}.out" 2> "out/heat_${TAG}.err" &
+            PID=$!
+            JOBID="$(hostname):$PID"
+            # Same line as the scheduler branches, printed once the job is launched.
+            echo "SUBMITTED scheduler=$SCHED job_id=$JOBID remote_dir=$HOME/${{ inputs.remote_dir }}"
+            echo "$JOBID" > out/job_id.txt
+            RC=0; wait "$PID" || RC=$?
+            if [ "$RC" -eq 124 ]; then
+              echo "FINISHED job_id=$JOBID exit=124 (timed out after ${SECS}s)"
+            else
+              echo "FINISHED job_id=$JOBID exit=$RC"
+            fi
+            exit "$RC"
           else
             echo "submit: unknown scheduler '$SCHED'" >&2; exit 2
           fi

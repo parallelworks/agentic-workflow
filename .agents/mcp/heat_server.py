@@ -61,7 +61,7 @@ import sys
 import time
 
 SERVER_NAME = "heat"
-SERVER_VERSION = "0.6.1"
+SERVER_VERSION = "0.7.0"
 AGENT_NAME = "site-runner-mcp"  # run-id prefix: site-runner-mcp-<target>-<NNNNNN>
 
 MODERN_VERSIONS = ["2026-07-28"]
@@ -452,8 +452,19 @@ def resolve_and_validate(args):
         raise Rejected("unknown target %r; valid targets: %s"
                        % (target, ", ".join(_target_names()) or "(none found)"))
     t = {f: _site(target, f) for f in
-         ("ssh_name", "scheduler", "mode", "mpi_ranks", "mpi_launch", "env_load_joined", "directives")}
+         ("ssh_name", "scheduler", "mode", "mpi_ranks", "mpi_launch", "env_load_joined", "directives",
+          "timeout")}
     t["name"] = target
+    if t["scheduler"] == "none":
+        # Same checks run.yaml makes, made before anything is staged or launched.
+        lines = t["directives"].rstrip("\n").split("\n")
+        if not t["directives"].strip() or any(not ln.startswith("#") for ln in lines):
+            raise Rejected("target %r has scheduler none, so its directives must be '#' comment "
+                           "lines only (e.g. '# NO SCHEDULER - directive placeholder'). Nothing "
+                           "was submitted." % target)
+        if t["timeout"] and not re.match(r"^\d+(:\d+){0,2}$", t["timeout"]):
+            raise Rejected("target %r has an invalid timeout %r; use seconds or [[HH:]MM:]SS. "
+                           "Nothing was submitted." % (target, t["timeout"]))
     try:
         ranks = int(t["mpi_ranks"])
     except ValueError:
@@ -502,6 +513,8 @@ def stage(t, grid, tol, max_iter):
         # Same bytes as `_site_query.py ... directives | base64 -w0`.
         "directives_b64": base64.b64encode(t["directives"].encode()).decode(),
     }
+    if t["scheduler"] == "none" and t["timeout"]:
+        inputs["timeout"] = t["timeout"]
     with open(os.path.join(rdir, "run.inputs.json"), "w") as fh:
         json.dump(inputs, fh, indent=2)
         fh.write("\n")
@@ -545,8 +558,17 @@ def submit(run_id, inputs):
         return record
 
     # `pw workflows run` returns as soon as the run is created (status "running"),
-    # so wait for the workflow — not the scheduler job — to finish.
-    view = _wait_terminal(slug, SUBMIT_WAIT_SECONDS)
+    # so wait for the workflow — not the scheduler job — to finish. With scheduler
+    # none the workflow runs the job itself in the foreground, so instead stop
+    # waiting once its log shows the SUBMITTED line (the job was launched).
+    if inputs.get("scheduler") == "none":
+        view, launched = _wait_submitted(slug, SUBMIT_WAIT_SECONDS)
+        if launched:
+            record.update(workflow_status=view.get("status"), status="submitted",
+                          job_id=launched)
+            return record
+    else:
+        view = _wait_terminal(slug, SUBMIT_WAIT_SECONDS)
     record["workflow_status"] = view.get("status")
 
     if view.get("status") != "completed":
@@ -624,6 +646,25 @@ def _wait_terminal(slug, budget):
         if view.get("status") in TERMINAL or time.time() > deadline:
             return view
         time.sleep(2)
+
+
+def _wait_submitted(slug, budget):
+    """For scheduler none: wait until the run's log shows the SUBMITTED line
+    (return its view and the job_id) or the run ends without one (job_id None)."""
+    deadline = time.time() + budget
+    while True:
+        vrc, vout, _ = _pw(["workflows", "runs", "view", slug, "-o", "json"], timeout=60)
+        try:
+            view = json.loads(vout) if vrc == 0 else {}
+        except ValueError:
+            view = {}
+        _, lout, _ = _pw(["workflows", "runs", "logs", "--job", "run", slug], timeout=60)
+        m = re.search(r"SUBMITTED scheduler=\S+ job_id=(\S+)", lout)
+        if m:
+            return view, m.group(1)
+        if view.get("status") in TERMINAL or time.time() > deadline:
+            return view, None
+        time.sleep(3)
 
 
 def _json_line(text, key):
@@ -790,12 +831,15 @@ def _integrity(inputs, directives, record):
                       "ok": record.get("mode") == inputs.get("mode")}
     if not checks["mode"]["ok"]:
         flags.append("MODE_MISMATCH: ran %s, target mode is %s" % (record.get("mode"), inputs.get("mode")))
-    nodes = _nodes_requested(directives)
+    # scheduler none runs on the one node the workflow reached: expect 1 host.
+    nodes = 1 if inputs.get("scheduler") == "none" else _nodes_requested(directives)
     hosts = record.get("distinct_hosts")
     checks["nodes"] = {"expected": nodes, "actual": hosts,
                        "ok": None if nodes is None else hosts == nodes}
     if nodes is not None and hosts != nodes:
-        flags.append("MULTI_NODE_MISMATCH: used %s hosts, directives request %s nodes" % (hosts, nodes))
+        flags.append("MULTI_NODE_MISMATCH: used %s hosts, %s" % (
+            hosts, "scheduler none runs on 1 node" if inputs.get("scheduler") == "none"
+            else "directives request %s nodes" % nodes))
     try:
         cap = int(str(inputs.get("max_iter")).strip())
     except ValueError:

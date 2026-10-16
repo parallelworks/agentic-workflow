@@ -90,7 +90,9 @@ same at any rank count. Any failure below makes that run's overall result FAIL
 - MODE: the record's `mode` must equal the run's `mode`.
 - MULTI-NODE: if the target's directives request N nodes (e.g. `--nodes=2`,
   `select=2`), `distinct_hosts` must equal N. A run that asked for 2 nodes but
-  reports distinct_hosts=1 silently benchmarked one node — flag it clearly.
+  reports distinct_hosts=1 silently benchmarked one node — flag it clearly. A
+  `scheduler: none` run (no scheduler; it runs on the login node) must report
+  distinct_hosts=1.
 - PROVENANCE: the solver's record has NO commit; the commit is the one in each
   run's `run.inputs.json` (saved in verdict.json). Flag any run missing it, or a
   comparison built from different commits — that undermines a portability claim.
