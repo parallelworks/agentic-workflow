@@ -49,7 +49,13 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   runs yourself, and never run `pw workflows run`. Hand every such request to the
   matching custom agent with Task, one Task per job. When the user names an agent
   ("use site-runner", "use the evaluator"), delegate to exactly that agent, even
-  though the procedure below would let you do the work yourself. The names
+  though the procedure below would let you do the work yourself. Put the agent's
+  name in `subagent_type`, exactly (e.g. `subagent_type: "evaluator"`); never use
+  `"default"` or a general-purpose agent for cluster work, and never rely on the
+  name appearing only in the prompt. When a user requests multiple agents, make
+  one Task to each requested agent. If you are a general subagent handed a
+  request that names an agent, pass it on unchanged to exactly that agent: the
+  routing defaults below never replace an agent the request names. The names
   `site-runner`, `site-runner-mcp`, `evaluator`, `evaluator-mcp`,
   `compare-agents`, `campaign-orchestrator` and `capacity-analyst` are agents,
   not procedures. Call Task with `background: false` unless you have other
@@ -57,6 +63,21 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   it: in a one-shot `pw code -p` run, a background agent finishes after the
   session has returned and its result reaches no one. If the named agent is not
   listed, stop and say so rather than doing the job yourself.
+  The Task prompt passes the user's request as given: the target and the grid,
+  plus run ids for an evaluation. Do not invent settings ("default grid size")
+  or restate the agent's procedure; the agent has its own instructions. Do not
+  ask for extra output such as file contents: ask for the agent's report, which
+  names its run id or verdict path. If the
+  user gave no grid, use 128 (the only grid with a reference field, and the
+  default in `workflows/run.inputs.json`) and say so in the prompt and your
+  reply.
+  REPORTING: report only results an agent has returned to you. While any Task
+  is still outstanding, say which ones are, never "all finished". Before sending
+  an agent back to repeat or continue the same work, check its evidence (for a
+  poll, `pw workflows runs logs <slug>` of its polls) and tell the user what you
+  found (reading logs is read-only and allowed). Do not start work the user did
+  not ask for (for example evaluating finished runs): offer it and wait for an
+  answer.
 Only `pw code --agent <name>` guarantees which agent runs; naming an agent in a
 prompt is a request the main session should honor.
 
@@ -68,7 +89,7 @@ is invoked:
   `poll_heat` runs `poll.yaml` until the job is DONE. No shell at all.
 - `site-runner` — the comparison baseline; builds the `pw workflows run` invocation
   in shell. Use it ONLY when the user names it explicitly.
-ROUTING RULE: send any run request to `site-runner-mcp` unless `site-runner` is
+ROUTING RULE (main session only): send any run request to `site-runner-mcp` unless `site-runner` is
 named. One intentional difference: `run_heat` rejects `grid < mpi_ranks` up front
 (no job submitted); the shell path would submit a job that MPI_Aborts.
 
@@ -80,7 +101,7 @@ TWO EVALUATORS, ONE DEFAULT, the same way. Both run the same `fetch.yaml` and
   against its target in code, and always writes the verdict.json. No shell.
 - `evaluator` — the comparison baseline; builds the invocations in shell. Use it
   ONLY when the user names it explicitly.
-ROUTING RULE: send any evaluation request to `evaluator-mcp` unless `evaluator`
+ROUTING RULE (main session only): send any evaluation request to `evaluator-mcp` unless `evaluator`
 is named. Intentional differences: `evaluate_run` refuses to fetch a job still in
 the queue, and also flags non-convergence and a run whose `directives_b64` is not
 the target's directives.
@@ -293,6 +314,11 @@ tooling injects untouched, plus an explicit `mpi_ranks` and `mode`.
 - Never modify `heat.c` to force a build or make results match. Never edit a
   target's directives to "fix" a run. Report obstacles; those are human
   decisions.
+- Agents write files only in their own `runs/<id>/` and `results/<id>/`
+  directories. No scratch files: never `/tmp` (not shared across nodes and not
+  part of the audit trail) and never the repo root. Values from sites.yaml come
+  from `scripts/_site_query.py`, piped straight into `base64 -w0` for the
+  directives; never retype a target's directives by hand.
 
 ## Fallback ladder (when capacity or network is tight)
 
