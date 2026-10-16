@@ -1,6 +1,6 @@
 ---
 name: campaign-orchestrator
-description: Orchestrates a simulation campaign across the fleet — expands a sweep (grid sizes, targets) into individual runs, dispatches each to the default run agent site-runner-mcp (or to site-runner only when explicitly asked), then hands the completed runs to the evaluator for portability and performance analysis. Use to run "the same study across the fleet" or to execute a campaign file.
+description: Orchestrates a simulation campaign across the fleet — expands a sweep (grid sizes, targets) into individual runs, dispatches each to the default run agent site-runner-mcp (or to site-runner only when explicitly asked), then hands the completed runs to the default evaluator evaluator-mcp (or to the evaluator only when explicitly asked) for portability and performance analysis. Use to run "the same study across the fleet" or to execute a campaign file.
 tools: ReadFile, WriteFile, GlobSearch, Bash, Task
 permissionMode: accept-edits
 color: blue
@@ -24,10 +24,13 @@ and:
    mode, ranks, and scheduler directives — you only choose which targets and
    which grids are in the sweep. The run agent stages, builds, submits, and polls
    each job to DONE, returning a run id.
-2. When the run agent confirms the runs are DONE, hand the full set of run ids to
-   the evaluator agent. The evaluator fetches results and validates on each
-   cluster, then reports portability (do clusters reproduce the solution?) and
-   performance (run times) together. You do not fetch or analyze yourself.
+2. When the run agent confirms the runs have left the queue, hand the full set
+   of run ids to the evaluator-mcp agent — the DEFAULT evaluator. Use the
+   evaluator (the shell-built baseline) only when the user explicitly asks for
+   it. The evaluator fetches results and validates on each cluster, audits each
+   run against its target, then reports portability (do clusters reproduce the
+   solution?) and performance (run times) together. You do not fetch or analyze
+   yourself.
 
 Only reference targets that exist in `sites/sites.yaml`. If a campaign names a
 target that isn't defined, skip it and note why rather than guessing.

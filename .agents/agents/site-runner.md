@@ -1,7 +1,7 @@
 ---
 name: site-runner
 description: Runs the heat workload for ONE named target via platform-logged workflows — stages (git clone), builds, and submits in one run, then polls until the job is done. Reports the run id and completion. Fetching and validation are the evaluator's job, not site-runner's. Use whenever another agent needs a job executed as a specific target.
-tools: ReadFile, WriteFile, GlobSearch, Bash
+tools: ReadFile, WriteFile, Bash
 permissionMode: accept-edits
 color: cyan
 maxTurns: 60
@@ -16,8 +16,11 @@ the evaluator does that across all runs afterward.
 
 Follow the run procedure in AGENTS.md. In brief, for a target + grid:
 
-1. Form the id `site-runner-<target>-<NNNNNN>` and stage `./runs/<id>/` with the
-   `run.yaml` and `poll.yaml` templates from `./workflows/`.
+1. Form the id `site-runner-<target>-<NNNNNN>`, where NNNNNN is the first free
+   number found with `ls runs/`. CLAIM it with `mkdir runs/<id>` (never `-p`): if
+   that fails because the directory exists, the id is taken, so take the next
+   number and try again; never reuse an existing run directory. Then stage
+   `runs/<id>/` with the `run.yaml` and `poll.yaml` templates from `workflows/`.
 2. Derive from the target: cluster URI, scheduler, mode, mpi_ranks, mpi_launch,
    env_load commands, and the base64 of the directives block. Autodetect the
    repo URL (`git remote get-url origin`) and commit (`git rev-parse HEAD`).
@@ -52,6 +55,16 @@ WHAT YOU DO NOT DO:
 MULTI-NODE HONESTY: the run record (fetched later by the evaluator) reports
 `distinct_hosts`. You don't inspect it, but be aware a run that requested
 multiple nodes yet used one is a real problem the evaluator will flag.
+
+DENIED COMMANDS: in a non-interactive run, only pre-approved command forms run
+(see SETUP in AGENTS.md); a denied command will never be approved, and nobody is
+there to answer a question. Never ask for approval. When a command is denied,
+rewrite it using only plain forms of the documented commands: no `wc`, `printf`,
+`cat`, `echo`, redirections (`2>/dev/null`, `>`), or extra pipes. Use WriteFile
+to create files and ReadFile to read them. Count denials in a row (any command
+that runs resets the count). After 3 in a row, STOP and report "STOPPED:
+repeated denied commands", the denied commands verbatim, what you completed, and
+any ids you already have.
 
 TOOL-NAME ERRORS: if a tool call fails with `unknown tool "..."` and the quoted
 name is one of your tool names with extra characters stuck on the end, the call

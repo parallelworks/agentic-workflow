@@ -1,7 +1,12 @@
-# `heat` MCP server — `run_heat` and `poll_heat`
+# `heat` MCP server — run, evaluate and compare tools
 
 `heat_server.py` is a lightweight, **stdlib-only** (Python ≥ 3.9) MCP server with
-two tools.
+six tools. Each agent launches its own server process, and the `--tools` flag
+decides which tools that process serves: the default (no flag) is `run_heat` and
+`poll_heat` for `site-runner-mcp`, exactly as before v0.4.0; `--tools
+evaluate_run` serves only `evaluate_run`, for `evaluator-mcp`; `--tools
+list_runs,compare_runs,write_summary` serves the three for `compare-agents`. A tool that is not
+served is absent from `tools/list` and refused by `tools/call` (`-32602`).
 
 **`run_heat(target, grid, [tol], [max_iter])`** does in code exactly what
 `site-runner` does in shell for the run step:
@@ -46,6 +51,49 @@ mcpServers:
 ```
 
 The tools are exposed to the model as `mcp__heat__run_heat` and `mcp__heat__poll_heat`.
+
+## `evaluate_run` (v0.4.0, for `evaluator-mcp`)
+
+**`evaluate_run(run_id, [l2_tolerance])`** does in code what the `evaluator` does
+in shell for one run, for a run id from either run agent:
+1. Read `runs/<run_id>/run.inputs.json` and `poll.inputs.json`, take the target
+   from the run id, and resolve the target's directives through the protected
+   `_site_query.py`. Rejects (nothing staged) an unknown run id, a run with no
+   job id, or an unusable `remote_dir`/`cluster`.
+2. Claim `runs/evaluator-mcp-<target>-<NNNNNN>/` with an atomic `mkdir` and stage
+   the unmodified `poll.yaml`, `fetch.yaml` and `validate.yaml` with their inputs.
+3. **Precondition:** one poll (`<eval-id>-poll`). If the job has not left the
+   queue, stop with `status: not_ready`, `overall: NOT EVALUATED`; nothing is
+   fetched.
+4. Fetch (`<eval-id>-fetch`) and validate (`<eval-id>-validate`), reading the JSON
+   line from each log. `validate.py` exits non-zero on a failed comparison, so a
+   validate workflow that ends `error` but printed a verdict still counts.
+5. **Integrity, in code**, against the run's own target: `ranks` vs `mpi_ranks`,
+   `mode`, `distinct_hosts` vs the nodes the directives request, convergence
+   (`converged` and `iterations < max_iter`), and directives parity (the run's
+   `directives_b64` must be the base64 of the target's directives — a byte
+   comparison). Each failure is a string in `integrity_flags`.
+6. **Always** write `results/<eval-id>/verdict.json` (status, ids, target, grid,
+   commit, mpi_ranks, mode, job id, l2_tolerance, directives, workflow slugs,
+   record, verdict, integrity_flags, checks, overall, error).
+
+`overall` is PASS only if `verdict.ok` is true and there are no flags.
+
+The node count is read from the directives **for the audit only**, never to launch
+anything (AGENTS.md: the run tooling never parses directives). Only exact forms
+count: `#SBATCH --nodes=N`, `#SBATCH -N N`, and `#PBS -l …select=N` or `nodes=N`.
+Anything else leaves `checks.nodes.ok` null ("not checked"), and the agent is told
+to judge it from `directives` and `distinct_hosts`.
+
+Scoped the same way, through `.agents/agents/evaluator-mcp.md`:
+
+```yaml
+mcpServers:
+  - heat:
+      command: python3
+      args: ["-I", ".agents/mcp/heat_server.py", "--tools", "evaluate_run"]
+      timeout: "10m"
+```
 
 ## Why hand-rolled
 The host has Python 3.9 and no `uv`, and the official MCP Python SDK needs Python
@@ -102,6 +150,13 @@ hook command, not the script it runs.
   difference from the shell path.
 - **Directives:** passed verbatim, base64-encoded. The bytes are identical to
   `_site_query.py … directives | base64 -w0`.
+- **Tool scoping:** a process serves only the tools named by `--tools`; calls to
+  any other tool are refused.
+- **Comparison only reads:** `list_runs`, `compare_runs` and `write_summary` read
+  local files (and `_site_query.py`); the only things they write are a new report
+  directory with its `comparison.json` and `report.md`, and that report's summary.
+- **Evaluation never resubmits:** `evaluate_run` runs only poll, fetch and
+  validate against the run agent's existing remote dir.
 
 ## Artifacts
 | Path | Contents |
@@ -112,6 +167,8 @@ hook command, not the script it runs.
 | `runs/<id>/rpc.jsonl` | This run's tools/call requests and responses |
 | `runs/<id>/polls.jsonl` | One line per poll: N, workflow slug, state, raw scheduler state |
 | `runs/<id>/agent-digest.json` | Redacted summary of the agent's session (tokens, turns, tool calls), written by `.agents/hooks/agent_digest.py` from a pw code hook |
+| `runs/evaluator-mcp-<t>-<N>/` | Staged poll/fetch/validate yaml + inputs, `rpc.jsonl`, `agent-digest.json` |
+| `results/evaluator-mcp-<t>-<N>/verdict.json` | The evaluation (always written, whatever the outcome) |
 | `runs/_mcp/heat-<UTC>-<pid>.jsonl` | Every JSON-RPC message in or out for one server process, including the handshake. Also mirrored to stderr |
 
 The trace files use `.jsonl` rather than `.log`. They hold only JSON-RPC messages
@@ -121,6 +178,9 @@ agents such as `compare-agents` may read them.
 ## Debugging without MCP
 ```
 python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid>   # stage only, no submit
+python3 -I .agents/mcp/heat_server.py --evaluate <run_id>            # one evaluate_run; DOES run poll/fetch/validate
+python3 -I .agents/mcp/heat_server.py --list [target]                # list_runs
+python3 -I .agents/mcp/heat_server.py --compare <mcp_run> <shell_run> # compare_runs; claims a report dir
 ```
 
 ## Using it with pw code
@@ -128,11 +188,13 @@ python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid>   # stage onl
    Agent definitions and their servers are ignored until you approve, and `-p`
    runs skip unapproved config silently. Any change to an agent file asks again.
 2. Pre-approve the tools, or `-p` runs auto-deny them:
-   `--allowedTools mcp__heat__run_heat --allowedTools mcp__heat__poll_heat`, or
-   add them with `/permissions add`.
+   `--allowedTools mcp__heat__run_heat --allowedTools mcp__heat__poll_heat`
+   (site-runner-mcp) or `--allowedTools mcp__heat__evaluate_run` (evaluator-mcp),
+   or add them with `/permissions add`.
 3. Enable the session-summary hooks once with `/hooks trust`.
 4. Check: `/mcp` under `pw code --agent site-runner-mcp` lists `heat`; the main
-   session's `/mcp` does not.
+   session's `/mcp` does not. Likewise under `--agent evaluator-mcp`, which lists
+   only `evaluate_run`.
 
 ## Diagnosing a failed run
 | Symptom | Cause | Where to look |
@@ -268,3 +330,84 @@ unchanged (`server/discover` → `tools/list` → `prompts/list` (-32601) → `t
 **Session record:** `~/.local/state/pw/code-sessions/<session>.jsonl` holds the
 messages, tool calls by name, and per-request token `usage`. It has no MCP
 protocol-level detail; for that, use the server trace.
+
+## `evaluate_run` checks without pw code (2026-10-15, v0.4.0)
+
+Run through `--evaluate <run_id>` and over stdio, before any agent used it. The
+cloud nodes had no capacity, but poll, fetch and validate run on the login node,
+so these are live workflow runs. The outputs were moved out of `runs/` and
+`results/` afterwards, so the agent's first evaluation is `evaluator-mcp-…-000001`.
+
+| Run | Expected | Result |
+|---|---|---|
+| `site-runner-mcp-gce-cpu-000003` (job 5) | PASS | evaluated, PASS, no flags |
+| `site-runner-mcp-gce-cpu-000007` (job 16) | PASS | evaluated, PASS, no flags |
+| `site-runner-gce-cpu-000001` (job 12) | PASS | evaluated, PASS, no flags |
+| `site-runner-gce-cpu-000000` (job 17, garbled directives) | FAIL | evaluated, FAIL: RANKS_MISMATCH (1 vs 4), MULTI_NODE_MISMATCH (1 vs 2), DIRECTIVES_MISMATCH |
+| `site-runner-mcp-gce-cpu-000006` (job 15, FAILED on the cluster) | FAIL | failed: fetch found no solver JSON record |
+| `site-runner-mcp-gce-cpu-000008` (job 18, cancelled) | FAIL | failed: "no solver JSON record found on cluster" |
+| throwaway run pointing at a RUNNING job | not ready | not_ready, NOT EVALUATED; nothing fetched |
+| unknown run id / `l2_tolerance: "abc"` | rejected | rejected, nothing staged |
+| `run_heat` on a `--tools evaluate_run` server, and `evaluate_run` on a default server | refused | `-32602 Unknown tool` both ways |
+
+## `list_runs` and `compare_runs` (v0.5.0, for `compare-agents`)
+
+Added because `compare-agents` twice paired the wrong evaluator verdicts by hand
+(2026-10-15, gpt-oss-120b): with six `evaluator` verdicts for three runs it read
+some, never opened the newest, and reported that the shell evaluator passed a run
+whose newest verdict failed it. The pairing is now code; the model writes the
+report.
+
+- **`list_runs([target])`** lists each run (`site-runner-mcp-…`, `site-runner-…`)
+  with grid, commit, job id, poll count (MCP: `polls.jsonl`; shell: `poll.yaml`
+  invocations in its hook digest) and the evaluator ids that evaluated it.
+- **`compare_runs(mcp_run_id, shell_run_id)`** returns, for one pair of runs of
+  one target:
+  - Input parity: differences other than `remote_dir`, with value-equal type
+    differences such as `4` vs `"4"` listed separately.
+  - `comparable`: same commit and grid.
+  - Whether each run's `directives_b64` matches the target.
+  - Poll counts and session cost per run.
+  - For each run, each evaluator's NEWEST verdict, with older ones listed as
+    `superseded`, `record_equal`, `verdict_equal`, `flags_only_mcp`,
+    `flags_only_shell` and `overall_agree`. The `evaluator`'s file has no
+    `overall`, so the same rule is applied to it: PASS only if `verdict.ok` and
+    no flags. A verdict written before integrity checks existed is `UNKNOWN`.
+  - Session cost counted once per `session_id`, with `tokens_per_id` for an
+    evaluator session that evaluated several runs.
+  
+  It claims `results/compare-agents-<target>-<NNNNNN>/` with an atomic `mkdir`
+  and saves `comparison.json` there, so a report can no longer overwrite an
+  earlier one. Since v0.6.0 it also writes `report.md`: every table, with each
+  figure's source, rendered from `comparison.json`.
+- **`write_summary(report_dir, summary)`** (v0.6.0) replaces the placeholder at
+  the end of that `report.md` with the model's summary (markdown, at most 4000
+  characters). It works once per report, only on a `compare-agents-…` directory,
+  and never touches the tables. Added after the first tool-based run, in which
+  the model rewrote the tables by hand and mislabeled the flag columns, called a
+  comparable pair "not comparable", and repeated session totals as per-run costs.
+
+CLI checks (2026-10-15), on `site-runner-mcp-gce-cpu-000007` vs `site-runner-gce-cpu-000000`:
+- **Parity and cost:**
+  - Parity fails on `directives_b64` only, with the same commit.
+  - Only the shell run's directives do not match the target.
+  - Costs: 20,276 tokens / 3 turns (MCP) vs 673,862 / 41 (shell).
+- **Evaluator pairs:**
+  - Both evaluators PASS the MCP run, with equal records and verdicts.
+  - Both FAIL the shell run. Only evaluator-mcp raised DIRECTIVES_MISMATCH.
+  - Per evaluated run: `evaluator` 222,480 tokens, `evaluator-mcp` 11,869.
+- **Superseded verdict:** with a superseded verdict put back temporarily, the
+  newest (`-000008`) was used and `-000006` was listed as superseded.
+- **Swapped arguments:** rejected, and no directory was claimed.
+
+## Directives comparison ignores trailing whitespace (v0.6.1)
+
+`site-runner-gce-cpu-000003` (job 28) encoded its directives without the final
+newline. `run.yaml` writes a newline after the block (`echo ""`), so the job
+script Slurm received was line-for-line the target's directives. Even so, v0.6.0's
+byte comparison flagged the run `DIRECTIVES_MISMATCH` in `evaluate_run` and as a
+parity failure in `compare_runs`. Both now decode the base64 and compare the text
+with trailing whitespace stripped. `evaluate_run` notes the case in
+`checks.directives.note`, and `compare_runs` lists it under
+`whitespace_only_differences`. A genuinely different block, such as the garbled
+`site-runner-gce-cpu-000000`, is still flagged.

@@ -11,11 +11,14 @@ and reads the hook payload JSON on stdin. Also usable by hand to backfill:
 It lives under .agents/ because hook trust covers only the hook COMMAND, not this
 file; pw code makes every agent edit under .agents/ ask a human first.
 
-Writes runs/<run_id>/agent-digest.json for every run the session CREATED:
+Writes runs/<id>/agent-digest.json for every run or evaluation the session CREATED:
   - site-runner-mcp: a run_heat result carrying the run_id
   - site-runner:     a Bash `pw workflows run ... --name <id> ... run.yaml` command
-Sessions that merely mention a run id (evaluator, compare-agents, the main agent)
-produce nothing.
+  - evaluator-mcp:   an evaluate_run result carrying the evaluator_id
+  - evaluator:       a Bash `pw workflows run ... --name <eval-id>-fetch|-validate ...`
+Sessions that merely mention an id (compare-agents, the main agent) produce
+nothing. One session can create several ids; each gets the same SESSION-level
+digest (same session_id), so sum costs per session_id, not per id.
 
 REDACTION: the digest keeps token usage, model, turn count, and the sequence of
 tool calls. It never copies message text or reasoning. Tool arguments are kept
@@ -35,8 +38,10 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUNS = os.path.join(REPO, "runs")
 RUN_ID = re.compile(r"\b(site-runner(?:-mcp)?-[A-Za-z0-9._-]+?-\d{6})\b")
+EVAL_STEP = re.compile(r"^(evaluator-[A-Za-z0-9._-]+?-\d{6})-(?:fetch|validate)$")
 BASH_KEEP = ("pw workflows ", "python3 scripts/_site_query.py", "git remote get-url",
-             "git rev-parse", "mkdir -p runs/", "cp workflows/", "cp ./workflows/")
+             "git rev-parse", "mkdir runs/", "mkdir -p runs/", "cp workflows/",
+             "cp ./workflows/", "ls runs", "ls results")
 PATH_KEYS = ("file_path", "path", "pattern")
 
 
@@ -69,8 +74,9 @@ def _result_info(tool, content):
     if tool.startswith("mcp__heat__"):
         try:
             res = json.loads(text)
-            info.update({k: res.get(k) for k in ("status", "run_id", "state", "done") if k in res})
-            info["ok"] = res.get("status") in ("submitted", "polled")
+            info.update({k: res.get(k) for k in ("status", "run_id", "state", "done",
+                                                 "evaluator_id", "overall") if k in res})
+            info["ok"] = res.get("status") in ("submitted", "polled", "evaluated")
         except ValueError:
             pass
     return info
@@ -119,12 +125,19 @@ def digest(transcript, agent_type=None, event=None):
                             m_id = re.search(r"--name\s+(\S+)", cmd)
                             if m_id and RUN_ID.fullmatch(m_id.group(1)):
                                 created[m_id.group(1)] = "site-runner"
+                        if name == "Bash" and cmd.startswith("pw workflows run"):
+                            m_id = re.search(r"--name\s+(\S+)", cmd)
+                            m_ev = EVAL_STEP.match(m_id.group(1)) if m_id else None
+                            if m_ev and not m_ev.group(1).startswith("evaluator-mcp-"):
+                                created[m_ev.group(1)] = "evaluator"
                 elif m.get("role") == "tool":
                     call = pending.pop(m.get("tool_call_id"), None)
                     if call:
                         call.update(_result_info(call["tool"], m.get("content")))
                         if call["tool"] == "mcp__heat__run_heat" and call.get("run_id"):
                             created[call["run_id"]] = "site-runner-mcp"
+                        if call["tool"] == "mcp__heat__evaluate_run" and call.get("evaluator_id"):
+                            created[call["evaluator_id"]] = "evaluator-mcp"
 
     return {
         "captured_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -148,7 +161,7 @@ def write(transcript, agent_type=None, event=None):
         rdir = os.path.join(RUNS, run_id)
         if not os.path.isdir(rdir):
             continue
-        out = dict(d, run_id=run_id, agent=agent)
+        out = dict(d, run_id=run_id, agent=agent, ids_created_by_session=sorted(created))
         with open(os.path.join(rdir, "agent-digest.json"), "w") as fh:
             json.dump(out, fh, indent=2)
             fh.write("\n")

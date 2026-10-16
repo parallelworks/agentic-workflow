@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""heat_server.py — a lightweight, stdlib-only MCP server exposing two tools
-for the site-runner-mcp agent:
+"""heat_server.py — a lightweight, stdlib-only MCP server. One process serves
+the tools its --tools flag names (default: run_heat,poll_heat), so each agent's
+own server instance exposes only that agent's tools:
+
+  site-runner-mcp (default):
 
   run_heat(target, grid)  stage + build + submit in one typed call. It performs the
                           run-invocation chain that site-runner builds by hand in
@@ -12,11 +15,21 @@ for the site-runner-mcp agent:
                           workflow run per poll, spaced 30s apart) until the job
                           has left the queue (DONE; success is NOT checked) or a
                           few minutes pass, and returns the state.
+  evaluator-mcp (--tools evaluate_run):
+  evaluate_run(run_id)    for a run either run agent made: polls once to confirm the
+                          job left the queue, runs the unmodified fetch.yaml and
+                          validate.yaml, checks the record against the run's own
+                          target (ranks, mode, nodes, convergence) and always writes
+                          results/evaluator-mcp-<target>-<NNNNNN>/verdict.json.
 
-Launch (stdio transport; this is what the agent's mcpServers entry runs):
-    python3 -I .agents/mcp/heat_server.py
-Debug (no MCP, no submit — stage only, print the staged inputs):
+Launch (stdio transport; this is what each agent's mcpServers entry runs):
+    python3 -I .agents/mcp/heat_server.py                        # site-runner-mcp
+    python3 -I .agents/mcp/heat_server.py --tools evaluate_run   # evaluator-mcp
+Debug (no MCP):
     python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid> [tol] [max_iter]
+        stage only, no submit; prints the staged inputs
+    python3 -I .agents/mcp/heat_server.py --evaluate <run_id>
+        runs evaluate_run once (this DOES run the poll/fetch/validate workflows)
 
 It lives under .agents/ because pw code makes every agent edit there ask a human
 first (fails in -p), so no agent can rewrite the server or its _site_query.py.
@@ -48,7 +61,7 @@ import sys
 import time
 
 SERVER_NAME = "heat"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.6.1"
 AGENT_NAME = "site-runner-mcp"  # run-id prefix: site-runner-mcp-<target>-<NNNNNN>
 
 MODERN_VERSIONS = ["2026-07-28"]
@@ -65,8 +78,10 @@ SITE_QUERY = os.path.join(HERE, "_site_query.py")
 SHARED_SITE_QUERY = os.path.join(REPO, "scripts", "_site_query.py")
 WORKFLOWS = os.path.join(REPO, "workflows")
 RUNS = os.path.join(REPO, "runs")
+RESULTS = os.path.join(REPO, "results")
 
 DEFAULT_TOL = "1e-3"
+DEFAULT_L2_TOLERANCE = "1e-6"  # validate.yaml's pass tolerance; NOT the solver's tol
 DEFAULT_MAX_ITER = 50000
 SUBMIT_WAIT_SECONDS = 540  # stays under the agent's 10m MCP timeout
 POLL_BUDGET_SECONDS = 420  # one poll_heat call; leaves headroom under 10m
@@ -74,11 +89,30 @@ POLL_INTERVAL_SECONDS = 30
 RUN_ID_RE = re.compile(r"^%s-[A-Za-z0-9._-]+-\d{6}$" % re.escape(AGENT_NAME))
 TERMINAL = ("completed", "error", "canceled", "cancelled", "failed")
 
-INSTRUCTIONS = (
+RUN_INSTRUCTIONS = (
     "Call run_heat once with a target name from sites/sites.yaml and a grid size; it "
     "stages, builds and submits the job and returns a run_id. Then call poll_heat with "
     "that run_id until it returns done=true."
 )
+EVAL_INSTRUCTIONS = (
+    "Call evaluate_run once per run id a run agent reported. It fetches, validates and "
+    "audits the run and saves its verdict.json; overall PASS needs a passing validation "
+    "and no integrity_flags."
+)
+
+
+COMPARE_INSTRUCTIONS = (
+    "Call list_runs to see the runs, then compare_runs once per pair of a site-runner-mcp "
+    "run and a site-runner run; it writes comparison.json and report.md. Then call "
+    "write_summary once with a short summary."
+)
+
+
+def _instructions():
+    served = [t["name"] for t in TOOLS]
+    return " ".join(([RUN_INSTRUCTIONS] if "run_heat" in served else [])
+                    + ([EVAL_INSTRUCTIONS] if "evaluate_run" in served else [])
+                    + ([COMPARE_INSTRUCTIONS] if "compare_runs" in served else []))
 
 RUN_TOOL = {
     "name": "run_heat",
@@ -149,6 +183,129 @@ POLL_TOOL = {
     },
 }
 
+EVAL_TOOL = {
+    "name": "evaluate_run",
+    "title": "Fetch, validate and audit one completed heat run",
+    "description": (
+        "Evaluate ONE run that a run agent reported (pass its run_id, e.g. "
+        "site-runner-mcp-gce-cpu-000001 or site-runner-gce-cpu-000001). Does everything "
+        "for you: confirms the job has left the queue, fetches the solver's run record, "
+        "validates the result on the cluster against the reference, checks the run "
+        "against its target (ranks, mode, nodes, convergence), and saves "
+        "results/<evaluator_id>/verdict.json. overall is PASS only if validation passed "
+        "AND there are no integrity_flags. Call it once per run."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string", "description": "A run id reported by site-runner-mcp or site-runner"},
+            "l2_tolerance": {"type": "string",
+                             "description": "Relative-L2 pass tolerance vs the reference (optional, "
+                                            "default 1e-6). NOT the solver's convergence tol."},
+        },
+        "required": ["run_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["evaluated", "not_ready", "rejected", "failed"]},
+            "evaluator_id": {"type": ["string", "null"]},
+            "run_id": {"type": "string"},
+            "overall": {"type": ["string", "null"], "enum": ["PASS", "FAIL", "NOT EVALUATED", None]},
+            "record": {"type": ["object", "null"]},
+            "verdict": {"type": ["object", "null"]},
+            "integrity_flags": {"type": "array", "items": {"type": "string"}},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "run_id", "overall"],
+    },
+}
+
+LIST_TOOL = {
+    "name": "list_runs",
+    "title": "List the run agents' runs and who evaluated them",
+    "description": (
+        "Read-only. Lists every site-runner-mcp and site-runner run in runs/ (optionally "
+        "for one target) with its grid, commit, job_id, poll count and the evaluator ids "
+        "that evaluated it. Use it to find pairs for compare_runs."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {"target": {"type": "string", "description": "Only runs of this target (optional)"}},
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "runs": {"type": "array"}},
+        "required": ["status", "runs"],
+    },
+}
+
+COMPARE_TOOL = {
+    "name": "compare_runs",
+    "title": "Compare one site-runner-mcp run with one site-runner run",
+    "description": (
+        "Read-only facts for ONE pair of runs of the same target: input parity (the only "
+        "expected difference is remote_dir), whether each run's directives match the "
+        "target, poll counts, cost per agent session (from hook digests), and both "
+        "evaluators' NEWEST verdict for each run with flags and PASS/FAIL compared. "
+        "Claims a new results/compare-agents-<target>-<NNNNNN>/ and writes "
+        "comparison.json and report.md (all tables) there; then call write_summary."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "mcp_run_id": {"type": "string", "description": "A site-runner-mcp run id"},
+            "shell_run_id": {"type": "string", "description": "A site-runner run id"},
+        },
+        "required": ["mcp_run_id", "shell_run_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["compared", "rejected"]},
+            "report_dir": {"type": ["string", "null"]},
+            "comparable": {"type": "boolean"},
+            "parity": {"type": "object"},
+            "runs": {"type": "object"},
+            "evaluations": {"type": "array"},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
+SUMMARY_TOOL = {
+    "name": "write_summary",
+    "title": "Add the summary to a comparison report",
+    "description": (
+        "Adds your short summary (plain markdown, at most 4000 characters) to the end of "
+        "the report.md that compare_runs wrote. Pass the report_dir compare_runs returned. "
+        "Works once per report; the tables above it are not changed."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "report_dir": {"type": "string", "description": "report_dir from compare_runs, e.g. results/compare-agents-gce-cpu-000001"},
+            "summary": {"type": "string", "description": "A short summary of the comparison (markdown)"},
+        },
+        "required": ["report_dir", "summary"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {"status": {"type": "string", "enum": ["written", "rejected"]},
+                       "report": {"type": ["string", "null"]}, "error": {"type": ["string", "null"]}},
+        "required": ["status"],
+    },
+}
+
+ALL_TOOLS = {"run_heat": RUN_TOOL, "poll_heat": POLL_TOOL, "evaluate_run": EVAL_TOOL,
+             "list_runs": LIST_TOOL, "compare_runs": COMPARE_TOOL, "write_summary": SUMMARY_TOOL}
+# Which tools this process serves, from --tools (see __main__). The default keeps
+# the server exactly as site-runner-mcp has always launched it.
 TOOLS = [RUN_TOOL, POLL_TOOL]
 
 
@@ -310,22 +467,22 @@ def resolve_and_validate(args):
     return t, grid, tol, max_iter
 
 
-def allocate_run_dir(target):
-    """First free <agent>-<target>-<NNNNNN>, claimed atomically with mkdir."""
-    os.makedirs(RUNS, exist_ok=True)
+def allocate_dir(prefix, target, base=RUNS):
+    """First free <prefix>-<target>-<NNNNNN> under `base`, claimed atomically with mkdir."""
+    os.makedirs(base, exist_ok=True)
     for n in range(1, 1000000):
-        run_id = "%s-%s-%06d" % (AGENT_NAME, target, n)
+        dir_id = "%s-%s-%06d" % (prefix, target, n)
         try:
-            os.mkdir(os.path.join(RUNS, run_id))
-            return run_id
+            os.mkdir(os.path.join(base, dir_id))
+            return dir_id
         except FileExistsError:
             continue
-    raise RuntimeError("no free run id for target %r" % target)
+    raise RuntimeError("no free id for %s on target %r" % (prefix, target))
 
 
 def stage(t, grid, tol, max_iter):
     """Stage ./runs/<id>/ exactly as AGENTS.md prescribes; return (run_id, inputs)."""
-    run_id = allocate_run_dir(t["name"])
+    run_id = allocate_dir(AGENT_NAME, t["name"])
     rdir = os.path.join(RUNS, run_id)
     for name in ("run.yaml", "poll.yaml"):
         shutil.copyfile(os.path.join(WORKFLOWS, name), os.path.join(rdir, name))
@@ -469,27 +626,46 @@ def _wait_terminal(slug, budget):
         time.sleep(2)
 
 
-def poll_once(run_id, n):
-    """One logged poll.yaml run named <id>-poll-<n>; returns (state, raw, slug, error)."""
-    rel = "runs/%s" % run_id
-    name = "%s-poll-%d" % (run_id, n)
-    rc, out, err = _pw(["workflows", "run", "-i", rel + "/poll.inputs.json", "--name", name,
-                        "-o", "json", rel + "/poll.yaml"], timeout=120)
-    slug = _find_slug(out)
-    if not slug:
-        return None, None, None, "pw workflows run (poll) returned no run slug: " + (err or out).strip()[-500:]
-    view = _wait_terminal(slug, 120)
-    if view.get("status") != "completed":
-        return None, None, slug, "poll workflow %s ended %s" % (slug, view.get("status") or "unknown")
-    _, lout, _ = _pw(["workflows", "runs", "logs", "--job", "poll", "--tail", "5", slug], timeout=60)
+def _json_line(text, key):
+    """The last line of a workflow log that is a JSON object containing `key`."""
     found = None
-    for line in lout.splitlines():
+    for line in text.splitlines():
         line = line.strip()
-        if line.startswith("{") and '"state"' in line:
+        if line.startswith("{") and '"%s"' % key in line:
             try:
                 found = json.loads(line)
             except ValueError:
                 pass
+    return found
+
+
+def run_workflow(dir_id, op, name, budget=120):
+    """Run the staged runs/<dir_id>/<op>.yaml as one logged workflow named `name`
+    and return (workflow status, log text of its `op` job, slug, error)."""
+    rel = "runs/%s" % dir_id
+    rc, out, err = _pw(["workflows", "run", "-i", "%s/%s.inputs.json" % (rel, op), "--name", name,
+                        "-o", "json", "%s/%s.yaml" % (rel, op)], timeout=120)
+    slug = _find_slug(out)
+    if not slug:
+        return None, "", None, ("pw workflows run (%s) returned no run slug: " % op
+                                + (err or out).strip()[-500:])
+    view = _wait_terminal(slug, budget)
+    _, lout, _ = _pw(["workflows", "runs", "logs", "--job", op, "--tail", "20", slug], timeout=60)
+    return view.get("status"), lout, slug, None
+
+
+def poll_once(run_id, n):
+    """One logged poll.yaml run named <id>-poll-<n>; returns (state, raw, slug, error)."""
+    return _poll(run_id, "%s-poll-%d" % (run_id, n))
+
+
+def _poll(dir_id, name):
+    status, lout, slug, error = run_workflow(dir_id, "poll", name)
+    if error:
+        return None, None, None, error
+    if status != "completed":
+        return None, None, slug, "poll workflow %s ended %s" % (slug, status or "unknown")
+    found = _json_line(lout, "state")
     if not found:
         return None, None, slug, "poll workflow %s printed no state line" % slug
     return found.get("state"), found.get("raw"), slug, None
@@ -550,6 +726,578 @@ def poll_heat(args):
 
 
 # --------------------------------------------------------------------------
+# evaluate_run (evaluator-mcp)
+# --------------------------------------------------------------------------
+EVAL_AGENT = "evaluator-mcp"  # evaluator id prefix: evaluator-mcp-<target>-<NNNNNN>
+RUN_AGENTS = ("site-runner-mcp", "site-runner")  # longest first: prefixes overlap
+REMOTE_DIR_RE = re.compile(r"^pw-heat/[A-Za-z0-9._-]+$")
+# Nodes a target's directives request — AUDIT ONLY. The run tooling never parses
+# directives (AGENTS.md); this reads them after the fact to compare with the
+# record's distinct_hosts, and only these exact forms count. Anything else
+# leaves nodes_requested null and the node check "not checked".
+NODE_PATTERNS = (
+    re.compile(r"^#SBATCH\s+(?:--nodes[= ]|-N\s*)(\d+)\s*$"),
+    re.compile(r"^#PBS\s+-l\s+(?:.*[:,])?(?:select|nodes)=(\d+)\b"),
+)
+
+
+def _b64_text(b64):
+    try:
+        return base64.b64decode(str(b64 or ""), validate=True).decode()
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _same_directives(a, b):
+    """Directive blocks are the same if they differ at most in trailing
+    whitespace: run.yaml echoes a newline after the block, so a block missing its
+    final newline yields the same job script (seen on site-runner-gce-cpu-000003)."""
+    return a is not None and b is not None and a.rstrip() == b.rstrip()
+
+
+def _split_run_id(run_id):
+    """(run agent, target) for <run-agent>-<target>-<NNNNNN>, else (None, None)."""
+    m = re.match(r"^(.+)-\d{6}$", run_id)
+    if not m:
+        return None, None
+    for agent in RUN_AGENTS:
+        if m.group(1).startswith(agent + "-"):
+            return agent, m.group(1)[len(agent) + 1:]
+    return None, None
+
+
+def _nodes_requested(directives):
+    for line in directives.splitlines():
+        for pat in NODE_PATTERNS:
+            m = pat.match(line.strip())
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _integrity(inputs, directives, record):
+    """Check the record against the run's own target; return (flags, checks)."""
+    flags, checks = [], {}
+    try:
+        want = int(str(inputs.get("mpi_ranks")).strip())
+    except ValueError:
+        want = None
+    got = record.get("ranks")
+    checks["ranks"] = {"expected": want, "actual": got, "ok": want is not None and got == want}
+    if not checks["ranks"]["ok"]:
+        flags.append("RANKS_MISMATCH: ran %s ranks, target mpi_ranks is %s" % (got, want))
+    checks["mode"] = {"expected": inputs.get("mode"), "actual": record.get("mode"),
+                      "ok": record.get("mode") == inputs.get("mode")}
+    if not checks["mode"]["ok"]:
+        flags.append("MODE_MISMATCH: ran %s, target mode is %s" % (record.get("mode"), inputs.get("mode")))
+    nodes = _nodes_requested(directives)
+    hosts = record.get("distinct_hosts")
+    checks["nodes"] = {"expected": nodes, "actual": hosts,
+                       "ok": None if nodes is None else hosts == nodes}
+    if nodes is not None and hosts != nodes:
+        flags.append("MULTI_NODE_MISMATCH: used %s hosts, directives request %s nodes" % (hosts, nodes))
+    try:
+        cap = int(str(inputs.get("max_iter")).strip())
+    except ValueError:
+        cap = None
+    iters = record.get("iterations")
+    converged = record.get("converged") is True and (cap is None or not isinstance(iters, int) or iters < cap)
+    checks["converged"] = {"converged": record.get("converged"), "iterations": iters, "max_iter": cap,
+                           "ok": converged}
+    if not converged:
+        flags.append("NOT_CONVERGED: converged=%s after %s of %s iterations"
+                     % (record.get("converged"), iters, cap))
+    # Text comparison, not parsing: did the job get the target's directives at all?
+    sent = _b64_text(inputs.get("directives_b64"))
+    sent_ok = _same_directives(sent, directives)
+    checks["directives"] = {"ok": sent_ok}
+    if sent_ok and sent != directives:
+        checks["directives"]["note"] = "differs from the target only in trailing whitespace"
+    if not sent_ok:
+        flags.append("DIRECTIVES_MISMATCH: the run's directives_b64 is not the base64 of the "
+                     "target's directives in sites.yaml, so the scheduler got other directives")
+    if not inputs.get("commit"):
+        flags.append("NO_COMMIT: the run's run.inputs.json has no commit")
+    return flags, checks
+
+
+def evaluate_run(args):
+    """Returns (structured_result, is_error, eval_id_or_None)."""
+    run_id = str(args.get("run_id", "")).strip()
+    tol = str(args.get("l2_tolerance", DEFAULT_L2_TOLERANCE)).strip()
+    base = {"status": "rejected", "evaluator_id": None, "run_id": run_id, "overall": None,
+            "error": None}
+    agent, target = _split_run_id(run_id)
+    rdir = os.path.join(RUNS, run_id)
+    if agent is None or not os.path.isfile(os.path.join(rdir, "run.inputs.json")):
+        base["error"] = ("unknown run_id %r: pass a run id reported by a run agent, e.g. "
+                         "site-runner-mcp-gce-cpu-000001 or site-runner-gce-cpu-000001 "
+                         "(runs/<run_id>/run.inputs.json must exist)" % run_id)
+        return base, True, None
+    try:
+        float(tol)
+    except ValueError:
+        base["error"] = "l2_tolerance must be a number such as 1e-6, got %r" % tol
+        return base, True, None
+    try:
+        with open(os.path.join(rdir, "run.inputs.json")) as fh:
+            inputs = json.load(fh)
+        with open(os.path.join(rdir, "poll.inputs.json")) as fh:
+            poll_inputs = json.load(fh)
+    except (OSError, ValueError) as e:
+        base["error"] = "cannot read the run's staged inputs: %s" % e
+        return base, True, None
+    remote_dir, cluster = str(inputs.get("remote_dir", "")), str(inputs.get("cluster", ""))
+    if not REMOTE_DIR_RE.match(remote_dir) or not cluster.startswith("pw://"):
+        base["error"] = ("the run's run.inputs.json has an unusable remote_dir %r or cluster %r; "
+                         "nothing was run" % (remote_dir, cluster))
+        return base, True, None
+    if not str(poll_inputs.get("job_id", "")).strip():
+        base["error"] = "the run has no scheduler job_id in poll.inputs.json; it was never submitted"
+        return base, True, None
+    try:
+        if _site(target, "name") != target:
+            raise Rejected("target %r (from the run id) is not in sites/sites.yaml" % target)
+        directives = _site(target, "directives")
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+
+    eval_id = allocate_dir(EVAL_AGENT, target)
+    edir = os.path.join(RUNS, eval_id)
+    for op in ("poll", "fetch", "validate"):
+        shutil.copyfile(os.path.join(WORKFLOWS, op + ".yaml"), os.path.join(edir, op + ".yaml"))
+    staged = {
+        "poll": {"cluster": cluster, "scheduler": poll_inputs.get("scheduler") or inputs.get("scheduler"),
+                 "job_id": str(poll_inputs["job_id"])},
+        "fetch": {"cluster": cluster, "remote_dir": remote_dir},
+        "validate": {"cluster": cluster, "remote_dir": remote_dir, "grid": str(inputs.get("grid")),
+                     "tol": tol},
+    }
+    for op, data in staged.items():
+        with open(os.path.join(edir, op + ".inputs.json"), "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+
+    out = {"status": None, "evaluator_id": eval_id, "run_id": run_id, "run_agent": agent,
+           "target": target, "grid": _maybe_int(inputs.get("grid")), "commit": inputs.get("commit"),
+           "mpi_ranks": _maybe_int(inputs.get("mpi_ranks")), "mode": inputs.get("mode"),
+           "job_id": staged["poll"]["job_id"], "l2_tolerance": tol, "directives": directives,
+           "poll_workflow": None, "fetch_workflow": None, "validate_workflow": None,
+           "record": None, "verdict": None, "integrity_flags": [], "checks": {},
+           "overall": None, "error": None}
+    try:
+        _evaluate(eval_id, out)
+    except Exception as e:  # pw missing, timeout...
+        out.update(status="failed", overall="FAIL", error=str(e))
+    os.makedirs(os.path.join(RESULTS, eval_id), exist_ok=True)
+    with open(os.path.join(RESULTS, eval_id, "verdict.json"), "w") as fh:
+        json.dump(out, fh, indent=2)
+        fh.write("\n")
+    return out, out["status"] != "evaluated", eval_id
+
+
+def _maybe_int(v):
+    try:
+        return int(str(v).strip())
+    except ValueError:
+        return v
+
+
+def _evaluate(eval_id, out):
+    """Precondition poll, fetch, validate and integrity checks; fills `out`."""
+    state, raw, slug, error = _poll(eval_id, eval_id + "-poll")
+    out["poll_workflow"] = slug
+    if error or state != "DONE":
+        out.update(status="not_ready" if not error else "failed", overall="NOT EVALUATED",
+                   error=error or ("the job has not left the queue (state %s, %s); nothing was "
+                                   "fetched or validated. Evaluate it later." % (state, raw)))
+        return
+    status, lout, slug, error = run_workflow(eval_id, "fetch", eval_id + "-fetch")
+    out["fetch_workflow"] = slug
+    record = _json_line(lout, "grid") or _json_line(lout, "ok")
+    if error or status != "completed" or not record or "ranks" not in record:
+        out.update(status="failed", overall="FAIL", record=record,
+                   error=error or "fetch workflow %s ended %s without a run record%s"
+                   % (slug, status, ": %s" % record["error"] if record and record.get("error") else ""))
+        return
+    out["record"] = record
+    status, lout, slug, error = run_workflow(eval_id, "validate", eval_id + "-validate")
+    out["validate_workflow"] = slug
+    verdict = _json_line(lout, "ok")
+    out["verdict"] = verdict
+    if error or not verdict:
+        # validate.py exits non-zero on a failed comparison, so the workflow
+        # ends "error" yet still printed a verdict; only a missing verdict fails.
+        out.update(status="failed", overall="FAIL",
+                   error=error or "validate workflow %s ended %s without a verdict" % (slug, status))
+        return
+    with open(os.path.join(RUNS, out["run_id"], "run.inputs.json")) as fh:
+        inputs = json.load(fh)
+    flags, checks = _integrity(inputs, out["directives"], record)
+    out.update(status="evaluated", integrity_flags=flags, checks=checks,
+               overall="PASS" if verdict.get("ok") is True and not flags else "FAIL")
+
+
+# --------------------------------------------------------------------------
+# list_runs / compare_runs (compare-agents) — read-only joins over local files
+# --------------------------------------------------------------------------
+COMPARE_AGENT = "compare-agents"
+EVAL_AGENTS = ("evaluator-mcp", "evaluator")  # longest first: prefixes overlap
+MCP_SIBLING = {"site-runner-mcp": "site-runner", "evaluator-mcp": "evaluator"}
+EXPECTED_DIFF = ("remote_dir",)  # each run has its own remote dir
+
+
+def _read_json(path):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _split_id(dir_id, agents):
+    m = re.match(r"^(.+)-(\d{6})$", dir_id)
+    if not m:
+        return None, None, None
+    for agent in agents:
+        if m.group(1).startswith(agent + "-"):
+            return agent, m.group(1)[len(agent) + 1:], int(m.group(2))
+    return None, None, None
+
+
+def _sessions():
+    """session_id -> ids whose agent-digest.json came from that session. One
+    session (an evaluator, typically) can create several ids; its cost must be
+    counted once."""
+    out = {}
+    for name in sorted(os.listdir(RUNS)) if os.path.isdir(RUNS) else []:
+        d = _read_json(os.path.join(RUNS, name, "agent-digest.json"))
+        if d and d.get("session_id"):
+            out.setdefault(d["session_id"], set()).add(name)
+    return out
+
+
+def _cost(dir_id, sessions):
+    """Session cost from runs/<id>/agent-digest.json, or None if there is none."""
+    d = _read_json(os.path.join(RUNS, dir_id, "agent-digest.json"))
+    if not d:
+        return None
+    calls = d.get("tool_calls") or []
+    ids = sorted(sessions.get(d.get("session_id"), {dir_id}))
+    tokens = (d.get("usage") or {}).get("total_tokens")
+    return {"source": "hook digest", "session_id": d.get("session_id"), "models": d.get("models"),
+            "turns": d.get("turns"), "total_tokens": tokens,
+            "tool_calls": d.get("tool_call_count"), "failed_tool_calls": d.get("failed_tool_calls"),
+            "malformed_tool_names": sum(1 for c in calls if "<|" in str(c.get("tool"))),
+            "ids_created_by_session": ids,
+            "tokens_per_id": (tokens // len(ids)) if isinstance(tokens, int) and ids else None}
+
+
+def _run_facts(run_id, sessions, target_directives=None):
+    agent, target, _ = _split_id(run_id, RUN_AGENTS)
+    rdir = os.path.join(RUNS, run_id)
+    inputs = _read_json(os.path.join(rdir, "run.inputs.json")) or {}
+    poll = _read_json(os.path.join(rdir, "poll.inputs.json")) or {}
+    facts = {"run_id": run_id, "agent": agent, "target": target, "grid": inputs.get("grid"),
+             "commit": inputs.get("commit"), "mpi_ranks": inputs.get("mpi_ranks"),
+             "job_id": str(poll.get("job_id") or "") or None, "cost": _cost(run_id, sessions)}
+    if target_directives is not None:
+        facts["directives_match_target"] = _same_directives(
+            _b64_text(inputs.get("directives_b64")), target_directives)
+    if agent == "site-runner-mcp":
+        submit = _read_json(os.path.join(rdir, "submit.json")) or {}
+        facts["workflow_run"] = submit.get("workflow_run")
+        try:
+            with open(os.path.join(rdir, "polls.jsonl")) as fh:
+                polls = [json.loads(l) for l in fh if l.strip()]
+        except (OSError, ValueError):
+            polls = []
+        facts["polls"] = {"source": "polls.jsonl", "count": len(polls),
+                          "last_state": polls[-1].get("state") if polls else None}
+    else:
+        d = _read_json(os.path.join(rdir, "agent-digest.json")) or {}
+        cmds = [str((c.get("args") or {}).get("command", "")) for c in d.get("tool_calls") or []]
+        n = sum(1 for c in cmds if c.startswith("pw workflows run ") and "poll.yaml" in c)
+        facts["polls"] = {"source": "hook digest" if d else "unavailable", "count": n if d else None,
+                          "last_state": None}
+    return facts
+
+
+def _evaluations(sessions):
+    """run_id -> evaluator agent -> list of evaluations, oldest first."""
+    out = {}
+    names = sorted(os.listdir(RESULTS)) if os.path.isdir(RESULTS) else []
+    for name in names:
+        agent, target, n = _split_id(name, EVAL_AGENTS)
+        v = _read_json(os.path.join(RESULTS, name, "verdict.json")) if agent else None
+        if not v or not v.get("run_id"):
+            continue
+        verdict, record = v.get("verdict") or {}, v.get("record") or {}
+        if "integrity_flags" not in v:
+            overall = "UNKNOWN (written before integrity checks existed)"
+        elif agent == "evaluator-mcp":
+            overall = v.get("overall")
+        else:  # the evaluator's file has no overall; apply the same rule
+            overall = "PASS" if verdict.get("ok") is True and not v["integrity_flags"] else "FAIL"
+        out.setdefault(v["run_id"], {}).setdefault(agent, []).append({
+            "evaluator_id": name, "n": n, "status": v.get("status"), "overall": overall,
+            "integrity_flags": [str(f).split(":")[0].strip() for f in v.get("integrity_flags") or []],
+            "verdict": verdict, "record": record, "cost": _cost(name, sessions)})
+    for agents in out.values():
+        for evs in agents.values():
+            evs.sort(key=lambda e: e["n"])
+    return out
+
+
+def _eval_pair(run_id, evals):
+    """Newest evaluation per evaluator for one run, and how the two compare."""
+    by_agent = evals.get(run_id, {})
+    pair = {"run_id": run_id}
+    for agent in EVAL_AGENTS:
+        evs = by_agent.get(agent) or []
+        newest = dict(evs[-1]) if evs else None
+        if newest:
+            newest.pop("n")
+            newest["superseded"] = [e["evaluator_id"] for e in evs[:-1]]
+        pair[agent] = newest
+    a, b = pair["evaluator-mcp"], pair["evaluator"]
+    if a and b:
+        pair["record_equal"] = a["record"] == b["record"]
+        pair["verdict_equal"] = a["verdict"] == b["verdict"]
+        pair["flags_only_mcp"] = sorted(set(a["integrity_flags"]) - set(b["integrity_flags"]))
+        pair["flags_only_shell"] = sorted(set(b["integrity_flags"]) - set(a["integrity_flags"]))
+        pair["overall_agree"] = a["overall"] == b["overall"]
+    else:
+        pair["missing"] = [ag for ag in EVAL_AGENTS if not pair[ag]]
+    for agent in EVAL_AGENTS:  # bulky; the pair already compares them
+        if pair[agent]:
+            pair[agent].pop("record")
+    return pair
+
+
+def list_runs(args):
+    """Returns (structured_result, is_error, None)."""
+    target = str(args.get("target", "")).strip() or None
+    sessions = _sessions()
+    evals = _evaluations(sessions)
+    runs = []
+    for name in sorted(os.listdir(RUNS)) if os.path.isdir(RUNS) else []:
+        agent, t, _ = _split_id(name, RUN_AGENTS)
+        if not agent or (target and t != target) or not os.path.isfile(
+                os.path.join(RUNS, name, "run.inputs.json")):
+            continue
+        f = _run_facts(name, sessions)
+        f["evaluated_by"] = {ag: [e["evaluator_id"] for e in evs]
+                             for ag, evs in evals.get(name, {}).items()}
+        f.pop("cost")
+        runs.append(f)
+    return {"status": "listed", "target": target, "runs": runs,
+            "next": "Pick a site-runner-mcp run and a site-runner run with the same target, grid "
+                    "and commit, and call compare_runs with them."}, False, None
+
+
+def compare_runs(args):
+    """Returns (structured_result, is_error, None)."""
+    mcp_id = str(args.get("mcp_run_id", "")).strip()
+    shell_id = str(args.get("shell_run_id", "")).strip()
+    base = {"status": "rejected", "report_dir": None, "error": None}
+    ids = {"site-runner-mcp": mcp_id, "site-runner": shell_id}
+    for want, rid in ids.items():
+        agent, target, _ = _split_id(rid, RUN_AGENTS)
+        if agent != want or not os.path.isfile(os.path.join(RUNS, rid, "run.inputs.json")):
+            base["error"] = ("%r is not a %s run id with runs/<id>/run.inputs.json; call list_runs "
+                             "to see the runs" % (rid, want))
+            return base, True, None
+    t_mcp, t_shell = _split_id(mcp_id, RUN_AGENTS)[1], _split_id(shell_id, RUN_AGENTS)[1]
+    if t_mcp != t_shell:
+        base["error"] = "the runs are on different targets (%s, %s); pair runs of one target" % (t_mcp, t_shell)
+        return base, True, None
+    try:
+        target_directives = _site(t_mcp, "directives")
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+
+    sessions = _sessions()
+    a = _read_json(os.path.join(RUNS, mcp_id, "run.inputs.json"))
+    b = _read_json(os.path.join(RUNS, shell_id, "run.inputs.json"))
+    diffs, type_only, space_only = {}, {}, {}
+    for k in sorted(set(a) | set(b)):
+        if k in EXPECTED_DIFF or a.get(k) == b.get(k):
+            continue
+        if k == "directives_b64" and _same_directives(_b64_text(a.get(k)), _b64_text(b.get(k))):
+            space_only[k] = "decoded blocks differ only in trailing whitespace"
+        elif str(a.get(k)) == str(b.get(k)):
+            type_only[k] = [a.get(k), b.get(k)]  # e.g. 4 vs "4": same value
+        else:
+            diffs[k] = ["<%d chars>" % len(str(a.get(k))) if k == "directives_b64" else a.get(k),
+                        "<%d chars>" % len(str(b.get(k))) if k == "directives_b64" else b.get(k)]
+    evals = _evaluations(sessions)
+    report_dir = allocate_dir(COMPARE_AGENT, t_mcp, base=RESULTS)
+    out = {
+        "status": "compared", "target": t_mcp, "grid": a.get("grid"),
+        "report_dir": "results/%s" % report_dir,
+        "comparable": a.get("commit") == b.get("commit") and str(a.get("grid")) == str(b.get("grid")),
+        "parity": {"ok": not diffs, "differences": diffs, "type_only_differences": type_only,
+                   "whitespace_only_differences": space_only,
+                   "expected_differences": list(EXPECTED_DIFF)},
+        "runs": {"site-runner-mcp": _run_facts(mcp_id, sessions, target_directives),
+                 "site-runner": _run_facts(shell_id, sessions, target_directives)},
+        "evaluations": [_eval_pair(mcp_id, evals), _eval_pair(shell_id, evals)],
+        "intentional_differences": [
+            "run_heat rejects grid < mpi_ranks before submitting; site-runner does not check",
+            "site-runner-mcp polls through poll_heat (server-side spacing); site-runner through Bash",
+            "evaluate_run confirms the job left the queue before fetching, and also checks "
+            "convergence and directives parity"],
+        "next": "report.md and comparison.json are written in report_dir. Read the facts, then "
+                "call write_summary once with report_dir and a short summary.",
+    }
+    with open(os.path.join(RESULTS, report_dir, "comparison.json"), "w") as fh:
+        json.dump(out, fh, indent=2)
+        fh.write("\n")
+    with open(os.path.join(RESULTS, report_dir, "report.md"), "w") as fh:
+        fh.write(_render_report(out))
+    return out, False, None
+
+
+SUMMARY_MARK = "<!-- summary: compare-agents fills this in with write_summary -->"
+SUMMARY_MAX = 4000
+
+
+def _cell(v):
+    if v is None or v == "" or v == []:
+        return "—"
+    if isinstance(v, bool):
+        return "yes" if v else "NO"
+    if isinstance(v, list):
+        v = ", ".join(str(x) for x in v)
+    return str(v).replace("|", "/").replace("\n", " ")
+
+
+def _table(header, rows):
+    lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    lines += ["| " + " | ".join(_cell(c) for c in row) + " |" for row in rows]
+    return "\n".join(lines)
+
+
+def _render_report(c):
+    """Deterministic report.md: every table comes from `c` (= comparison.json)."""
+    m, s = c["runs"]["site-runner-mcp"], c["runs"]["site-runner"]
+
+    def cost(r, k):
+        return (r.get("cost") or {}).get(k) if r.get("cost") else "no digest"
+
+    out = ["# Agent comparison: %s, grid %s" % (c["target"], c["grid"]), "",
+           "Tables generated by `compare_runs` (heat server %s) at %s from "
+           "`comparison.json` in this directory; the summary at the end is the "
+           "compare-agents model's." % (SERVER_VERSION, _now()[:19] + "Z"), "",
+           "## Run pair: site-runner-mcp vs site-runner", "",
+           _table(["", "site-runner-mcp", "site-runner", "source"], [
+               ["run id", m["run_id"], s["run_id"], "artifact"],
+               ["commit", (m["commit"] or "")[:12], (s["commit"] or "")[:12], "run.inputs.json"],
+               ["scheduler job id", m["job_id"], s["job_id"], "poll.inputs.json"],
+               ["directives match target", m.get("directives_match_target"),
+                s.get("directives_match_target"), "run.inputs.json vs sites.yaml"],
+               ["polls", m["polls"]["count"], s["polls"]["count"],
+                "%s / %s" % (m["polls"]["source"], s["polls"]["source"])],
+               ["last poll state", m["polls"]["last_state"], s["polls"]["last_state"] or "not recorded",
+                "polls.jsonl"],
+               ["turns", cost(m, "turns"), cost(s, "turns"), "hook digest"],
+               ["tokens", cost(m, "total_tokens"), cost(s, "total_tokens"), "hook digest"],
+               ["tool calls (failed)", "%s (%s)" % (cost(m, "tool_calls"), cost(m, "failed_tool_calls")),
+                "%s (%s)" % (cost(s, "tool_calls"), cost(s, "failed_tool_calls")), "hook digest"],
+               ["malformed tool names", cost(m, "malformed_tool_names"), cost(s, "malformed_tool_names"),
+                "hook digest"],
+               ["model", cost(m, "models"), cost(s, "models"), "hook digest"],
+           ]), ""]
+    p = c["parity"]
+    out.append("**Comparable** (same commit and grid): %s. **Input parity**: %s."
+               % (_cell(c["comparable"]), "ok" if p["ok"] else "FAILED"))
+    if p["differences"]:
+        out.append("Differing inputs: %s." % ", ".join(
+            "`%s` (%s vs %s)" % (k, _cell(v[0]), _cell(v[1])) for k, v in sorted(p["differences"].items())))
+    if p["type_only_differences"]:
+        out.append("Same value, different JSON type: %s." % ", ".join(
+            "`%s` (%r vs %r)" % (k, v[0], v[1]) for k, v in sorted(p["type_only_differences"].items())))
+    if p.get("whitespace_only_differences"):
+        out.append("Same text, different trailing whitespace: %s." % ", ".join(
+            "`%s`" % k for k in sorted(p["whitespace_only_differences"])))
+    out.append("Expected to differ: %s." % ", ".join("`%s`" % k for k in p["expected_differences"]))
+    out += ["", "## Evaluator pairs: evaluator-mcp vs evaluator", ""]
+    for e in c["evaluations"]:
+        a, b = e.get("evaluator-mcp"), e.get("evaluator")
+
+        def ev(x, k):
+            return x.get(k) if x else "not evaluated"
+
+        def ecost(x, k):
+            if not x:
+                return "not evaluated"
+            return (x.get("cost") or {}).get(k) if x.get("cost") else "no digest"
+
+        def nids(x):
+            ids = ecost(x, "ids_created_by_session")
+            return len(ids) if isinstance(ids, list) else ids
+
+        out += ["### Run `%s`" % e["run_id"], "",
+                _table(["", "evaluator-mcp", "evaluator", "source"], [
+                    ["evaluator id (newest)", ev(a, "evaluator_id"), ev(b, "evaluator_id"), "results/"],
+                    ["superseded", ev(a, "superseded"), ev(b, "superseded"), "results/"],
+                    ["overall", ev(a, "overall"), ev(b, "overall"), "verdict.json"],
+                    ["integrity flags", ev(a, "integrity_flags") or "none",
+                     ev(b, "integrity_flags") or "none", "verdict.json"],
+                    ["relative L2", (a or {}).get("verdict", {}).get("relative_l2") if a else "not evaluated",
+                     (b or {}).get("verdict", {}).get("relative_l2") if b else "not evaluated", "verdict.json"],
+                    ["tokens for this run", ecost(a, "tokens_per_id"), ecost(b, "tokens_per_id"),
+                     "hook digest, session / runs evaluated"],
+                    ["session tokens", ecost(a, "total_tokens"), ecost(b, "total_tokens"), "hook digest"],
+                    ["session turns", ecost(a, "turns"), ecost(b, "turns"), "hook digest"],
+                    ["runs evaluated in session", nids(a), nids(b), "hook digest"],
+                ]), ""]
+        if a and b:
+            out.append("Record equal: %s. Verdict equal: %s. Overall agrees: %s. Flags only "
+                       "evaluator-mcp raised: %s. Flags only the evaluator raised: %s."
+                       % (_cell(e["record_equal"]), _cell(e["verdict_equal"]), _cell(e["overall_agree"]),
+                          _cell(e["flags_only_mcp"]) if e["flags_only_mcp"] else "none",
+                          _cell(e["flags_only_shell"]) if e["flags_only_shell"] else "none"))
+        else:
+            out.append("Not paired: %s has not evaluated this run." % " and ".join(e["missing"]))
+        out.append("")
+    out += ["## Intentional differences", ""] + ["- " + d for d in c["intentional_differences"]]
+    out += ["", "## Summary", "", SUMMARY_MARK, ""]
+    return "\n".join(out)
+
+
+def write_summary(args):
+    """Fill the summary placeholder of a report compare_runs wrote. Returns
+    (structured_result, is_error, None)."""
+    rel = str(args.get("report_dir", "")).strip().rstrip("/")
+    summary = str(args.get("summary", "")).strip()
+    base = {"status": "rejected", "report_dir": rel, "error": None}
+    name = rel[len("results/"):] if rel.startswith("results/") else rel
+    if not re.match(r"^%s-[A-Za-z0-9._-]+-\d{6}$" % re.escape(COMPARE_AGENT), name):
+        base["error"] = "report_dir must be the report_dir compare_runs returned, e.g. results/compare-agents-gce-cpu-000001"
+        return base, True, None
+    if not summary or len(summary) > SUMMARY_MAX:
+        base["error"] = "summary must be non-empty plain markdown of at most %d characters" % SUMMARY_MAX
+        return base, True, None
+    path = os.path.join(RESULTS, name, "report.md")
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError:
+        base["error"] = "no report.md in %s; call compare_runs first" % rel
+        return base, True, None
+    if text.count(SUMMARY_MARK) != 1:
+        base["error"] = "this report already has a summary; it is written once"
+        return base, True, None
+    with open(path, "w") as fh:
+        fh.write(text.replace(SUMMARY_MARK, summary))
+    return {"status": "written", "report_dir": rel, "report": rel + "/report.md", "error": None}, False, None
+
+
+# --------------------------------------------------------------------------
 # JSON-RPC / MCP protocol
 # --------------------------------------------------------------------------
 class RpcError(Exception):
@@ -583,20 +1331,23 @@ def handle(method, params):
         version = requested if requested in LEGACY_VERSIONS else LEGACY_VERSIONS[0]
         return {"protocolVersion": version, "capabilities": {"tools": {}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": INSTRUCTIONS}, None
+                "instructions": _instructions()}, None
     if method == "server/discover":
         return done({"supportedVersions": MODERN_VERSIONS + LEGACY_VERSIONS,
                      "capabilities": {"tools": {}},
                      "_meta": {"io.modelcontextprotocol/serverInfo":
                                {"name": SERVER_NAME, "version": SERVER_VERSION}},
-                     "instructions": INSTRUCTIONS}), None
+                     "instructions": _instructions()}), None
     if method == "ping":
         return done({}), None
     if method == "tools/list":
         return done({"tools": TOOLS}), None
     if method == "tools/call":
         name = params.get("name")
-        tool = {"run_heat": run_heat, "poll_heat": poll_heat}.get(name)
+        served = [t["name"] for t in TOOLS]
+        tool = {"run_heat": run_heat, "poll_heat": poll_heat, "evaluate_run": evaluate_run,
+                "list_runs": list_runs, "compare_runs": compare_runs,
+                "write_summary": write_summary}.get(name) if name in served else None
         if tool is None:
             raise RpcError(-32602, "Unknown tool: %s" % name)
         args = params.get("arguments") or {}
@@ -682,7 +1433,36 @@ def stage_only(argv):
     return 0
 
 
+def evaluate_only(run_id):
+    """CLI debug: run evaluate_run once without MCP (it DOES run the workflows)."""
+    result, is_error, _ = evaluate_run({"run_id": run_id})
+    print(json.dumps(result, indent=2))
+    return 1 if is_error else 0
+
+
 if __name__ == "__main__":
-    if len(sys.argv) >= 4 and sys.argv[1] == "--stage-only":
-        sys.exit(stage_only(sys.argv[2:]))
+    argv = sys.argv[1:]
+    if len(argv) >= 3 and argv[0] == "--stage-only":
+        sys.exit(stage_only(argv[1:]))
+    if len(argv) == 2 and argv[0] == "--evaluate":
+        sys.exit(evaluate_only(argv[1]))
+    if len(argv) in (1, 2) and argv[0] == "--list":
+        print(json.dumps(list_runs({"target": argv[1]} if len(argv) == 2 else {})[0], indent=2))
+        sys.exit(0)
+    if len(argv) == 3 and argv[0] == "--compare":
+        res, err, _ = compare_runs({"mcp_run_id": argv[1], "shell_run_id": argv[2]})
+        print(json.dumps(res, indent=2))
+        sys.exit(1 if err else 0)
+    if len(argv) == 2 and argv[0] == "--tools":
+        names = [n.strip() for n in argv[1].split(",") if n.strip()]
+        unknown = [n for n in names if n not in ALL_TOOLS]
+        if unknown or not names:
+            sys.stderr.write("unknown tool(s) %s; choose from %s\n" % (unknown, ", ".join(ALL_TOOLS)))
+            sys.exit(2)
+        TOOLS = [ALL_TOOLS[n] for n in names]
+    elif argv:
+        sys.stderr.write("usage: heat_server.py [--tools a,b] | --stage-only <target> <grid> "
+                         "[tol] [max_iter] | --evaluate <run_id> | --list [target] | "
+                         "--compare <mcp_run_id> <shell_run_id>\n")
+        sys.exit(2)
     sys.exit(serve())
