@@ -90,6 +90,12 @@ sites/
 scripts/
   submit.sh poll.sh fetch.sh capacity.sh   LEGACY pw ssh wrappers (kept for
                              comparison; agents no longer use these)
+  _site_query.py             reads one field of one target from sites.yaml
+  session_tools/             for HUMANS, not agents: read pw code session
+                             transcripts to check what agents actually did —
+                             delegation (Task calls, subagent_type), each
+                             subagent's commands and polls, denied/garbled
+                             calls, tokens (see session_tools/README.md)
 workflows/
   run/poll/fetch/validate/capacity .yaml + .inputs.json
                              platform-logged workflow templates (the layer

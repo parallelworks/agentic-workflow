@@ -1,4 +1,338 @@
-# HANDOFF: `run_heat` MCP server and `site-runner-mcp` agent
+# HANDOFF: MCP-enabled agents, agent comparison, and scheduler-less targets
+
+This file has three parts:
+
+1. **Status and context (2026-10-17)**: what exists now, how it differs from the
+   original brief, and what was learned from testing. Read this first.
+2. **Open issues and next steps**: where to pick up.
+3. **Lessons learned about developing agentic workflows**: written to be lifted
+   into a `SKILL.md` later.
+
+The **original brief (2026-10-13)** follows unchanged, as the historical record
+of what was asked for. Where it conflicts with part 1, part 1 is current.
+
+---
+
+# Part 1: Status and context (2026-10-17)
+
+Branch `add-mcp-run`. Last pushed commit `2cd9730` ("Add scheduler: none option
+in sites.yaml"). The human does every git write; a PreToolUse hook blocks git
+writes from Claude Code. The usage log `results/agent-summary.md` holds one row
+per `pw code` session tested (agent, test, model, turns, tokens, result).
+
+## What exists now
+
+**Agents** (`.agents/agents/`), in two MCP / shell pairs plus helpers:
+
+| Agent | Role | Tools |
+|---|---|---|
+| `site-runner-mcp` | DEFAULT run agent | `mcp__heat__run_heat`, `mcp__heat__poll_heat` |
+| `site-runner` | Shell baseline, used only when named | `ReadFile`, `WriteFile`, `Bash` |
+| `evaluator-mcp` | DEFAULT evaluator | `mcp__heat__evaluate_run` |
+| `evaluator` | Shell baseline, used only when named | `ReadFile`, `WriteFile`, `Bash` |
+| `compare-agents` | Post-hoc comparison of each MCP agent with its shell sibling | `mcp__heat__list_runs`, `compare_runs`, `write_summary`, `ReadFile`, `Bash` (read-only) |
+| `campaign-orchestrator`, `capacity-analyst` | Unchanged roles; the orchestrator routes to the MCP agents by default | as before |
+
+**MCP server** `.agents/mcp/heat_server.py` (v0.7.0; documented in
+`.agents/mcp/README.md`):
+- Hand-rolled, Python 3.9 stdlib only (the host has 3.9 and no `uv`; the MCP
+  SDK needs 3.10 or later). Supports both the legacy `initialize` handshake and
+  the 2026-07-28 `server/discover` form. Traces every message to
+  `runs/_mcp/heat-*.jsonl` and each tool call to `runs/<id>/rpc.jsonl`.
+- `--tools` chooses which tools a process serves, so each agent sees only its own.
+  Only `pw workflows run` / `runs view` / `runs logs` can execute; no ssh or scp.
+- Resolves targets through `scripts/_site_query.py` as a subprocess, and refuses
+  to run if that file differs from the protected copy
+  `.agents/mcp/_site_query.py`.
+- `evaluate_run` audits ranks, mode, node count, convergence and directives
+  parity and always writes `verdict.json`. `compare_runs` writes the whole
+  `report.md` and `comparison.json`; the model adds only a summary through
+  `write_summary`.
+- CLI modes for testing without a model: `--stage-only <target> <grid>`,
+  `--evaluate <run_id>`, `--list [target]`, `--compare <mcp_run> <shell_run>`.
+
+**Hook** `.agents/hooks/agent_digest.py` runs on `SubagentStop` and `SessionEnd`
+and writes `runs/<id>/agent-digest.json`: turns, tokens, model and tool-call
+sequence, with no message text. `compare-agents` reads these digests.
+
+**`scheduler: none` targets** (new in `2cd9730`):
+- The job runs in the foreground on the login/head node under `timeout`, using
+  the target's optional `timeout` field (default `00:10:00`; quote it, because
+  YAML reads an unquoted `00:10:00` as 600).
+- Directives are required but must be `#` comment lines only, e.g.
+  `# NO SCHEDULER - directive placeholder`.
+- The run still prints `SUBMITTED scheduler=none job_id=<host>:<pid>`.
+  `poll.yaml` reports RUNNING while that process lives, and UNKNOWN if the poll
+  reaches a different host. `capacity.yaml` reports the node's cores, load and
+  GPUs.
+- `evaluate_run` expects exactly 1 host. Both cpu and gpu modes and any rank
+  count are allowed, because cloud head nodes can be private and have GPUs.
+- The local `sites.yaml` (git-ignored; a template is committed) has `gce-login`,
+  which uses `mpi_launch: "mpiexec --use-hwthread-cpus"`. The login node has 2
+  cores with 2 threads each, and OpenMPI counts cores as slots.
+
+**Delegation rules in AGENTS.md** (main session only, keyed to having the Task
+tool):
+- Delegate all cluster work.
+- Put the named agent in `subagent_type`, and make one Task per requested agent.
+- General subagents pass a named agent on unchanged.
+- Hand-off prompts carry only the target, grid and run ids.
+- Use `background: false` unless there is other work to do meanwhile.
+- REPORTING: report only results actually received, check evidence before
+  re-dispatching an agent, and offer unrequested work rather than doing it.
+
+**How this differs from the original brief:**
+- **Server:** stdlib, not an SDK.
+- **Tool scope:** polling, evaluation and comparison were wrapped as MCP tools
+  too; the brief listed them as out of scope.
+- **`site-runner.md` was edited**, against the brief, with the owner's approval,
+  to make the baseline a fair comparison.
+- **Workflows:** `run.yaml`, `poll.yaml` and `capacity.yaml` changed, for
+  `scheduler: none`.
+- **`sites.yaml`** is git-ignored, with `sites/sites.yaml.template` committed.
+
+## What testing showed (gpt-oss-120b unless noted; details in `results/agent-summary.md`)
+
+- **Cost, same job:**
+  - `site-runner-mcp` takes about 3 turns and 21k–27k tokens; `site-runner`
+    takes 19–37 turns and 230k–520k tokens.
+  - `evaluator-mcp` takes about 2 turns and 17k tokens per run; `evaluator`
+    takes 16–40 turns and 190k–490k tokens.
+- **Reliability:**
+  - The MCP agents almost never failed.
+  - After its prompts were tightened, the shell `site-runner` ran every job
+    correctly (9 of 9 delegated runs on 2026-10-16).
+  - Its failures moved to labelling and reporting: one run named
+    `site-runner-mcp-…`, and one false "still running" report while it made 39
+    polls. It also kept recovering from denied commands.
+- **Delegation from the main session:**
+  - Before the AGENTS.md rules, the main agent did shell work itself whenever it
+    had the tools to. It also read agent names as procedure names, and picked
+    `subagent_type: "default"`.
+  - After the rules, it delegated to the named agent on its first call in every
+    test, interactive and `-p`, and its final replies became accurate.
+  - gpt-oss-20b often garbles tool names (e.g. `Task<|channel|>commentary`), a
+    vLLM harmony-parser bug, so delegation on 20b is unreliable.
+- **`scheduler: none`:**
+  - Both run agents worked, in `-p` and interactive sessions, and all four
+    evaluations PASS.
+  - The solve took about 0.28 s on the login node, against about 2.2 s on two
+    `gce-cpu` worker nodes.
+
+## Practical notes for resuming
+
+- **The gpt-oss-120b endpoint id changes each time its vLLM job restarts**, which
+  happens at least every 2 hours because of the job's time limit (00065 … 00075
+  so far). Check `pw sessions ls | grep vllm` and pick the model in `/model`.
+- **gce worker nodes cold-start in minutes.** `idle~` means powered down and
+  `idle#` means booting. Jobs sit in PENDING/CONFIGURING meanwhile.
+- **pw code session transcripts:**
+  - `~/.local/state/pw/code-sessions/<sid>.jsonl`, with subagents under
+    `<sid>/subagents/agent-task-N.jsonl`.
+  - Never read `*.log` files there (secrets policy).
+  - Read them with `scripts/session_tools/`. It lists each session's prompts
+    and Task calls, dumps a transcript, summarizes each subagent, and gives a
+    session's cost and call health; see its README.
+- **Workspace Trust:** every edit to an agent file or settings needs
+  re-approval at the next `pw code` launch. Edits to AGENTS.md and the server do
+  not.
+- **`-p` runs:**
+  - They need `--allowedTools`; AGENTS.md "SETUP" lists them.
+  - They never fire `SessionEnd`, so after a `-p --agent` run the digest is
+    backfilled by hand:
+    `python3 -I .agents/hooks/agent_digest.py --transcript <session.jsonl> --agent <name>`.
+
+---
+
+# Part 2: Open issues and next steps
+
+In rough priority order.
+
+1. **Fixes only partly tested:**
+   - The `site-runner` polling rewrite has only been seen polling a job that was
+     already DONE. Its RUNNING path and 30-poll cap are untested.
+   - The REPORTING rule hasn't been tested with outstanding background Tasks.
+   - Repeat the 7-instance prompt: "Please use 7 separate instances of the
+     site-runner agent to run the heat app with grid 128 on the gce-cpu target."
+2. **Keep gathering `site-runner` variability on gpt-oss-120b**, interactively,
+   through delegation, so the hook logs cost automatically.
+3. **Small fix:** the shell `evaluator` sometimes runs
+   `mkdir -p results/<eval-id>`, which `-p` runs deny. Tell it to use
+   `mkdir results/<eval-id>` (or let WriteFile create it), and add
+   `Bash(mkdir results/*)` to the evaluator allow list in AGENTS.md.
+4. **Not yet evaluated:** `site-runner-gce-cpu-000005` and
+   `site-runner-mcp-gce-cpu-000012`.
+5. **No compare-agents reports yet for the 2026-10-16/17 runs**, e.g. the
+   `gce-login` pair `site-runner-mcp-gce-login-000004` vs
+   `site-runner-gce-login-000001`.
+6. **`scheduler: none` gaps:**
+   - gpu mode is untested.
+   - `capacity.yaml`'s `none` branch has only been run locally, not through a
+     workflow.
+   - Long jobs relying on `run_heat` returning at the `SUBMITTED` line are
+     untested.
+   - Clusters with several login nodes behind one name are untested; poll
+     reports UNKNOWN there by design.
+7. **Gaps in the cost logging** (all were filled by hand from transcripts):
+   - A subagent stopped by the user fires no `SubagentStop`, so its digest goes
+     stale.
+   - An agent that creates no run id gets no digest.
+   - The main session's own cost is never captured.
+
+   Possible fix: have the hook also write a per-session digest under
+   `runs/_mcp/`.
+8. **Questions for the pw developers:**
+   - The vLLM job's 2-hour time limit means the endpoint id changes.
+   - gpt-oss sometimes ends a turn empty, and interactive mode doesn't prompt it
+     to continue (`-p` runs do).
+   - The tool-name garbling in vLLM's harmony parser.
+   - Task accepts `subagent_type: "default"` for a request naming an agent.
+   - Is there a guaranteed way to delegate other than `--agent`?
+   - A stopped subagent fires no hook.
+9. **Older backlog:**
+   - `write_summary` should reject numbers that aren't in `comparison.json`.
+   - The procedure is duplicated between `site-runner.md` and AGENTS.md, and
+     the copies are drifting; consolidate.
+   - Give `campaign-orchestrator` the `mcp__heat__*` tools (deferred by the
+     owner).
+   - Hooks re-trust (waiting on a colleague).
+   - The stale `results/compare-agents-gce-cpu-000001`.
+   - A future agent that fills in `sites.yaml` by inspecting existing clusters.
+
+---
+
+# Part 3: Lessons learned about developing agentic workflows
+
+Written to become a `SKILL.md`. Each lesson came from an observed failure in
+this repo.
+
+## Design: what belongs in code and what in the model
+
+- **Put exact-syntax chains in a deterministic tool.** Building a `pw workflows
+  run` invocation by hand (derived fields, base64, inputs JSON, polling) took
+  the shell agents 20–40 turns and 200k–500k tokens. It also failed in ways
+  that looked like success: directives retyped by hand silently sent jobs to the
+  wrong partition. One typed tool call made it about 3 turns, about 13–20 times
+  cheaper, and correct.
+- **Make tools coarse and their results small.** Use few parameters, nothing
+  derived, and return a compact structured result with a `next` hint. Let the
+  tool write the artifacts (`verdict.json`, `report.md`) itself, so the model
+  only summarizes. When the model wrote reports, it mis-paired runs, overwrote
+  files and invented numbers.
+- **Give each agent only the tools it needs**, and scope MCP servers to an
+  agent (`--tools` per agent). An agent that can't read files can't make up
+  file contents either, but tell it so explicitly. When asked for a file's
+  contents, the `evaluator-mcp` agents passed off part of a tool result as the
+  whole file.
+- **Keep a shell baseline beside the tool-based agent, and make it fair.**
+  Apply prompt fixes to both, pre-approve both the same way, and compare on
+  durable artifacts, not on what the agents report.
+
+## Instructions: shared files are read by every agent
+
+- **A rule in a shared file reaches every agent.** AGENTS.md is read by the main
+  session and by every custom agent:
+  - "Always delegate, and stop if you can't" made `site-runner` refuse its own
+    job.
+  - "Route run requests to site-runner-mcp by default" made `site-runner` decide
+    it *was* `site-runner-mcp` and mislabel its run.
+
+  Key each rule to something the agent can check (for example "if you have the
+  Task tool"), or label it "(main session only)".
+- **Give every agent an explicit identity line**, e.g. "You are `site-runner`;
+  your ids start with `site-runner-`; you never pick or switch agents."
+- **Spell out the exact command for any value that must be byte-exact**, e.g.
+  `… directives | base64 -w0`. Forbid retyping data by hand and writing scratch
+  files (`/tmp` isn't shared across nodes and isn't part of the audit trail).
+- **Say what each command's output does and doesn't contain.** `pw workflows
+  run` returns only a slug; the state is in `pw workflows runs logs <slug>`.
+  Without that, an agent wrote shell loops grepping the wrong output, made 39
+  polls, and reported a finished job as running.
+- **Forbid shell loops and scripts for polling.** Allow one action per step, a
+  bounded number of attempts, and an honest "not DONE after N".
+- **Add stop rules:**
+  - for denied commands (rewrite with plain allowed forms; stop after 3 in a
+    row);
+  - for garbled tool names (retry once; stop after 3);
+  - and never report success after stopping.
+- **Keep each procedure in one place.** Copies in agent files drift from
+  AGENTS.md, and the agent follows whichever copy it reads.
+
+## Delegation (main session to subagents)
+
+- **Naming an agent in a prompt isn't enough.** The model has to put that name
+  in `subagent_type`. Without an explicit rule, gpt-oss chose `"default"`. The
+  general-purpose subagent then delegated again, and once swapped the requested
+  baseline for the default MCP agent.
+- **When a request names several agents, require one Task per requested agent.**
+- **Pass the request on as given.** A main agent that invents settings ("use
+  the default grid"), restates the procedure, or asks for extra outputs causes
+  downstream improvisation.
+- **Use `background: false` in one-shot `-p` runs.** A background subagent's
+  result arrives after the session has returned and reaches no one.
+- **Only `--agent <name>` guarantees which agent runs.** Everything else is a
+  request the model may or may not honor.
+
+## Verification: never trust an agent's report
+
+- **Check agent claims against ground truth:** scheduler accounting (`sacct`),
+  workflow logs, staged inputs compared with what the prescribed commands
+  produce, and the verdict files. Confirmed false claims included "all seven
+  finished", "still running after 15 minutes" (the job had finished before the
+  first poll) and "both evaluators agree" (the baseline never ran).
+- **Use the real client as the test oracle.** When a tool path fails, first find
+  which of three things happened: the server never started, the tool threw, or
+  the model never called the tool. Server traces and session transcripts tell
+  them apart.
+- **Test in layers before spending model time:**
+  1. run the workflow shell logic locally with a fake launcher;
+  2. run the server's CLI modes (`--stage-only`, `--evaluate`) for
+     deterministic end-to-end checks, including error paths;
+  3. then `pw code -p --agent`;
+  4. then interactive sessions.
+- **Record cost per session** with hooks, in a greppable, awk-parsable table
+  (`| agent | test | llm | turns | tokens | result |`). Note which figures were
+  backfilled from transcripts.
+
+## Platform behaviour worth knowing (pw code v7.122, gpt-oss on vLLM)
+
+- **Permissions in `-p` runs:**
+  - Unapproved commands are denied automatically.
+  - An `--allowedTools` prefix rule must end on a whole word.
+  - A glob rule (`Bash(mkdir runs/*)`) can allow a strict form while denying
+    `-p`.
+  - Every part of a `&&` or `|` compound must match a rule.
+- **GlobSearch skips git-ignored paths.** Agents that need `runs/` or
+  `results/` need `ls`.
+- **Interactive sessions:**
+  - A subagent waiting for approval looks hung.
+  - An empty model turn gets no automatic retry; typing "continue" recovers it.
+  - `! cmd` output goes into the conversation as a user message.
+- **Hooks and lifecycle:**
+  - `-p` runs fire `SubagentStop` for delegated agents but never `SessionEnd`.
+  - A stopped subagent fires nothing.
+  - MCP servers can outlive a `-p` session under the daemon.
+- **Model and infrastructure:**
+  - gpt-oss sometimes ends a turn after reasoning alone and emits malformed
+    tool names, and the 20b model does so far more often.
+  - Model endpoints and cloud nodes come and go. Check availability (and the
+    current model id) before blaming the agent.
+
+## Small technical gotchas met along the way
+
+- **YAML 1.1 (PyYAML)** reads an unquoted `00:10:00` as the integer 600. Quote
+  times, or accept both forms.
+- **`grep -q` under `set -o pipefail`** can exit early and fail the writer with
+  SIGPIPE, flipping an `if`. Use `grep … >/dev/null` in conditions.
+- **OpenMPI without a scheduler** counts physical cores as slots. Use
+  `--use-hwthread-cpus` or `--oversubscribe` deliberately.
+- **`run.yaml` echoes a newline after the directives block**, so directives that
+  differ only in trailing whitespace yield the same job script. Compare them
+  ignoring trailing whitespace.
+
+---
+
+# Original brief (2026-10-13, historical)
 
 ## How to use this document
 
