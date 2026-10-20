@@ -82,6 +82,11 @@ app/heat/
   Makefile                   cpu + gpu (OpenACC) build targets
   validate.py                compares a run's field to the reference (L2 norm)
   reference/heat_128.ref     golden reference field for grid 128
+sandbox/
+  docker-compose.yaml        Configuration for launching a JupyterLab + Ollama + Docker volume
+                             group of containers for a sandbox environment from which to run
+                             the agentic workflow with a local LLM.
+  README.md	             Instructions for using this sandbox environment
 sites/
   sites.yaml.template        example fleet registry — copy to sites.yaml
   sites.yaml                 THE fleet registry (list of targets) — your copy,

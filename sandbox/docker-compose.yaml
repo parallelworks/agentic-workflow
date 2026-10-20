@@ -1,0 +1,28 @@
+services:
+  ollama:
+    image: ollama/ollama
+    # Set this env var to keep model loaded in RAM
+    # indefinitely to bypass automatic unloading.
+    # If automatic unloading is active, expect
+    # timeout errors in the chat interface if
+    # using limited (i.e. laptop) hardware.
+    environment:
+      - OLLAMA_KEEP_ALIVE=-1
+    volumes:
+      - ollama-models:/root/.ollama
+    # No "ports:" needed — only pw code (in the jupyter container) talks to it,
+    # and they share the compose network. Add "ports: [11434:11434]" only if you
+    # also want to reach it from the WSL host directly (e.g. for curl testing).
+    restart: unless-stopped
+
+  jupyter:
+    image: quay.io/jupyter/scipy-notebook:latest
+    ports:
+      - "8888:8888"
+    volumes:
+      - /mnt/c/Users/sa03s/Desktop/work:/home/jovyan/work
+    stdin_open: true   # the -it from your original command
+    tty: true
+
+volumes:
+  ollama-models:
