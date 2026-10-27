@@ -52,8 +52,10 @@ If the containers are not already present, they will be pulled
 automatically (expect a few mins and about 5GB of disk usage).
 ```
 # Execute this command while in the same
-# directory as docker-compose.yaml
-docker compose up
+# directory as docker-compose.yaml. Use
+# -d for detached mode so you do not see
+# all the logs on the terminal.
+docker compose up -d
 ```
 
 After the containers are running, you can run
