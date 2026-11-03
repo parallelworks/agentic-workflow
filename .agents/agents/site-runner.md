@@ -23,8 +23,12 @@ Follow the run procedure in AGENTS.md. In brief, for a target + grid:
 1. Form the id `site-runner-<target>-<NNNNNN>`, where NNNNNN is the first free
    number found with `ls runs/`. CLAIM it with `mkdir runs/<id>` (never `-p`): if
    that fails because the directory exists, the id is taken, so take the next
-   number and try again; never reuse an existing run directory. Then stage
-   `runs/<id>/` with the `run.yaml` and `poll.yaml` templates from `workflows/`.
+   number and try again; never reuse an existing run directory. A directory
+   whose `mkdir` failed belongs to another agent running at the same time:
+   never read, write, or submit from it, even if it looks incomplete. Your id is
+   the one whose `mkdir` succeeded; keep it for the whole task and claim no
+   other. Then stage `runs/<id>/` with the `run.yaml` and `poll.yaml` templates
+   from `workflows/`.
 2. Derive from the target: cluster URI, scheduler, mode, mpi_ranks, mpi_launch,
    env_load commands, and the base64 of the directives block. The `cluster` input
    is the target's `ssh_name`, verbatim
@@ -34,7 +38,8 @@ Follow the run procedure in AGENTS.md. In brief, for a target + grid:
    `python3 scripts/_site_query.py sites/sites.yaml <target> directives | base64 -w0`
    `python3 scripts/_site_query.py sites/sites.yaml <target> env_load_joined`
    Never retype or copy the directives by hand, and never encode them from a
-   file you wrote. Autodetect the repo URL (`git remote get-url origin`) and
+   file you wrote. Copy the base64 string into `directives_b64` exactly as the
+   command printed it; one changed character makes it invalid. Autodetect the repo URL (`git remote get-url origin`) and
    commit (`git rev-parse HEAD`). If the target's scheduler is `none` (no
    scheduler; the job runs on the login node), also run
    `python3 scripts/_site_query.py sites/sites.yaml <target> timeout` and, if it
@@ -47,7 +52,10 @@ Follow the run procedure in AGENTS.md. In brief, for a target + grid:
    `job_id` from the `SUBMITTED … job_id=<J>` line of `pw workflows runs logs
    <slug>` (if it is not there yet, `sleep 5` and read again). If a
    phase fails, the log's `=== STAGE/BUILD/SUBMIT ===` markers show which — report
-   it verbatim and stop.
+   it verbatim and stop. Do not repair the inputs, re-encode the directives, or
+   claim a new id and submit again: a failed run is a result for a human to
+   read. (`base64: invalid input` at SUBMIT means `directives_b64` was copied
+   wrongly; report that.)
 4. POLL, one poll per step, never a shell loop or script:
    a. `pw workflows run -i runs/<id>/poll.inputs.json --name <id>-poll-N runs/<id>/poll.yaml`
       (N = 1, 2, …). Its output only says the run was CREATED and gives a slug;

@@ -140,7 +140,7 @@ def digest(transcript, agent_type=None, event=None):
                             created[call["evaluator_id"]] = "evaluator-mcp"
 
     return {
-        "captured_at": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "hook_event": event,
         "session_id": session_id,
         "agent_type_from_hook": agent_type,
@@ -185,7 +185,7 @@ def main():
         os.makedirs(os.path.join(RUNS, "_mcp"), exist_ok=True)
         with open(os.path.join(RUNS, "_mcp", "hooks.jsonl"), "a") as fh:
             fh.write(json.dumps({
-                "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "event": payload.get("hook_event_name"), "agent_type": payload.get("agent_type"),
                 "keys": sorted(payload), "transcript_found": bool(path and os.path.isfile(path)),
                 "written": written}) + "\n")

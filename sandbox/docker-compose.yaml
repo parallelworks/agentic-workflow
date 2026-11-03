@@ -6,8 +6,16 @@ services:
     # If automatic unloading is active, expect
     # timeout errors in the chat interface if
     # using limited (i.e. laptop) hardware.
+    # OLLAMA_CONTEXT_LENGTH: Ollama's default context window silently
+    # truncates pw code's prompts (system prompt + tool definitions are
+    # ~8-9k tokens even for a small agent), so the model never sees its tools.
     environment:
       - OLLAMA_KEEP_ALIVE=-1
+      - OLLAMA_CONTEXT_LENGTH=32768
+      # One prompt cache per slot, so two agents (e.g. site-runner-mcp and
+      # evaluator-mcp) keep separate warm prefixes. Each slot allocates its own
+      # full context window, so memory for the context grows with this number.
+      - OLLAMA_NUM_PARALLEL=2
     volumes:
       - ollama-models:/root/.ollama
     # No "ports:" needed — only pw code (in the jupyter container) talks to it,
@@ -19,10 +27,23 @@ services:
     image: quay.io/jupyter/scipy-notebook:latest
     ports:
       - "8888:8888"
+    # jupyter-home keeps the rest of $HOME (Claude Code transcripts in ~/.claude,
+    # pw code sessions in ~/.local/state/pw, ~/bin, dotfiles) when the container
+    # is recreated (docker compose down, a newer image, a config change). Without
+    # it they live only in the container's writable layer. An empty volume is
+    # filled from the image's /home/jovyan on first use, with jovyan ownership;
+    # the work bind mount sits on top of it.
     volumes:
+      - jupyter-home:/home/jovyan
       - /mnt/c/Users/sa03s/Desktop/work:/home/jovyan/work
     stdin_open: true   # the -it from your original command
     tty: true
 
 volumes:
   ollama-models:
+  # Fixed name so it can be pre-filled from the current container before the
+  # first "up" that uses it (see README.md, "Keeping $HOME"); external: compose never
+  # creates or deletes it, so "docker compose down -v" cannot remove it either.
+  jupyter-home:
+    name: jupyter-home
+    external: true

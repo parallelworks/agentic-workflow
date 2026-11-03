@@ -88,6 +88,37 @@ where `<tag>` must be replaced with the exact model tag
 but capable tool calling model for running on a laptop
 with 16GB RAM).
 
+### Keeping $HOME in the JupyterLab container
+
+Only `~/work` is on the host disk. Everything else in `/home/jovyan`
+(Claude Code transcripts in `~/.claude`, `pw code` sessions in
+`~/.local/state/pw`, `~/bin`, dotfiles) is kept in the `jupyter-home`
+Docker volume, so it survives `docker compose down`, a newer image, or
+a change to the compose file. A plain stop/start (e.g. a reboot) keeps
+the container and its files either way.
+
+The volume is `external`, so create it once before the first
+`docker compose up`:
+```
+docker volume create jupyter-home
+```
+An empty volume is filled from the image's `/home/jovyan` the first
+time the container starts.
+
+If a JupyterLab container from before this change is still around
+and you want to keep its home directory, copy it into the volume
+before recreating the container (run from the directory holding
+`docker-compose.yaml`, while the old container is running):
+```
+docker volume create jupyter-home
+docker compose exec -T jupyter tar -C /home/jovyan --exclude=./work -cf - . \
+  | docker run --rm -i -v jupyter-home:/to alpine tar -C /to -xpf -
+docker compose up -d jupyter
+```
+`tar -p` keeps the jovyan ownership and permissions (including the
+0700 directories and 0600 files). Recreating the container ends any
+`pw code` or Claude Code session running inside it.
+
 ### Quick tests of the model directly from Ollama
 
 Try both a normal chat and a tool calling request  before 

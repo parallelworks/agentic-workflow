@@ -89,13 +89,16 @@ POLL_INTERVAL_SECONDS = 30
 RUN_ID_RE = re.compile(r"^%s-[A-Za-z0-9._-]+-\d{6}$" % re.escape(AGENT_NAME))
 TERMINAL = ("completed", "error", "canceled", "cancelled", "failed")
 
+# Model-facing text names tools as pw code exposes them: mcp__<server>__<tool>,
+# with the server registered as "heat" in both MCP agents' mcpServers. A small
+# model called the bare name (evaluate_run) when its prompt used it.
 RUN_INSTRUCTIONS = (
-    "Call run_heat once with a target name from sites/sites.yaml and a grid size; it "
-    "stages, builds and submits the job and returns a run_id. Then call poll_heat with "
+    "Call mcp__heat__run_heat once with a target name from sites/sites.yaml and a grid size; it "
+    "stages, builds and submits the job and returns a run_id. Then call mcp__heat__poll_heat with "
     "that run_id until it returns done=true."
 )
 EVAL_INSTRUCTIONS = (
-    "Call evaluate_run once per run id a run agent reported. It fetches, validates and "
+    "Call mcp__heat__evaluate_run once per run id a run agent reported. It fetches, validates and "
     "audits the run and saves its verdict.json; overall PASS needs a passing validation "
     "and no integrity_flags."
 )
@@ -121,7 +124,7 @@ RUN_TOOL = {
         "Submit the heat job for ONE target (a name from sites/sites.yaml) at grid "
         "size N. Does everything for you: clones the repo on the cluster, builds, "
         "and submits. Returns run_id and job_id. Returns right after submit; it does "
-        "NOT wait for the job — call poll_heat with the run_id next. "
+        "NOT wait for the job — call mcp__heat__poll_heat with the run_id next. "
         "grid must be >= the target's mpi_ranks."
     ),
     "inputSchema": {
@@ -153,16 +156,16 @@ POLL_TOOL = {
     "name": "poll_heat",
     "title": "Check whether a submitted heat job has left the queue",
     "description": (
-        "Check the scheduler state of a job submitted by run_heat. Pass the run_id "
-        "that run_heat returned. Polls for up to a few minutes and returns as soon "
+        "Check the scheduler state of a job submitted by mcp__heat__run_heat. Pass the run_id "
+        "that mcp__heat__run_heat returned. Polls for up to a few minutes and returns as soon "
         "as the job has left the queue (state DONE, done true). If done is false, "
-        "call poll_heat again with the same run_id. done=true means only that the "
+        "call mcp__heat__poll_heat again with the same run_id. done=true means only that the "
         "job left the queue, NOT that it succeeded; the evaluator checks the result."
     ),
     "inputSchema": {
         "type": "object",
         "properties": {
-            "run_id": {"type": "string", "description": "The run_id returned by run_heat, e.g. site-runner-mcp-gce-cpu-000001"},
+            "run_id": {"type": "string", "description": "The run_id returned by mcp__heat__run_heat, e.g. site-runner-mcp-gce-cpu-000001"},
         },
         "required": ["run_id"],
         "additionalProperties": False,
@@ -217,6 +220,7 @@ EVAL_TOOL = {
             "verdict": {"type": ["object", "null"]},
             "integrity_flags": {"type": "array", "items": {"type": "string"}},
             "error": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
         },
         "required": ["status", "run_id", "overall"],
     },
@@ -313,7 +317,7 @@ TOOLS = [RUN_TOOL, POLL_TOOL]
 # Tracing (stderr + a per-process JSONL file; never stdout)
 # --------------------------------------------------------------------------
 def _now():
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 class Trace:
@@ -322,7 +326,7 @@ class Trace:
         try:
             d = os.path.join(RUNS, "_mcp")
             os.makedirs(d, exist_ok=True)
-            stamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             self.path = os.path.join(d, "heat-%s-%d.jsonl" % (stamp, os.getpid()))
         except OSError:
             pass
@@ -375,7 +379,7 @@ def _check_site_query():
         raise Rejected("cannot read _site_query.py for the parity check: %s" % e)
     raise Rejected("scripts/_site_query.py differs from the protected copy "
                    ".agents/mcp/_site_query.py; nothing was staged. A human must "
-                   "review the change and re-copy it before run_heat can resolve targets.")
+                   "review the change and re-copy it before mcp__heat__run_heat can resolve targets.")
 
 
 def _site(target, field):
@@ -629,7 +633,7 @@ def run_heat(args):
             json.dump({"cluster": inputs["cluster"], "scheduler": inputs["scheduler"],
                        "job_id": rec["job_id"]}, fh, indent=2)
             fh.write("\n")
-        result["next"] = "Call poll_heat with run_id %s until it returns done=true." % run_id
+        result["next"] = "Call mcp__heat__poll_heat with run_id %s until it returns done=true." % run_id
     return result, rec["status"] != "submitted", run_id
 
 
@@ -719,7 +723,7 @@ def poll_heat(args):
             "done": False, "next": None, "error": None}
     rdir = os.path.join(RUNS, run_id)
     if not RUN_ID_RE.match(run_id) or not os.path.isfile(os.path.join(rdir, "poll.inputs.json")):
-        base["error"] = ("unknown run_id %r: pass the run_id that run_heat returned for a "
+        base["error"] = ("unknown run_id %r: pass the run_id that mcp__heat__run_heat returned for a "
                          "submitted job (e.g. %s-gce-cpu-000001)" % (run_id, AGENT_NAME))
         return base, True, None
     with open(os.path.join(rdir, "poll.inputs.json")) as fh:
@@ -761,7 +765,7 @@ def poll_heat(args):
     elif state == "UNKNOWN":
         base["next"] = "The scheduler reported an unexpected state (%s). Report it and stop." % raw
     else:
-        base["next"] = ("The job is still %s (%s). Call poll_heat again with run_id %s."
+        base["next"] = ("The job is still %s (%s). Call mcp__heat__poll_heat again with run_id %s."
                         % (state, raw, run_id))
     return base, False, run_id
 
@@ -866,6 +870,27 @@ def _integrity(inputs, directives, record):
 
 
 def evaluate_run(args):
+    """Returns (structured_result, is_error, eval_id_or_None). Adds `next`, the
+    instruction the model sees with the result (not saved in verdict.json):
+    small models ignored the prompt's stop rules and went hunting for runs and
+    files with tools they do not have, so every result says plainly to stop."""
+    result, is_error, eval_id = _evaluate_run(args)
+    if result["status"] == "rejected" and (result.get("error") or "").startswith("unknown run_id"):
+        result["next"] = ("This run id does not exist as given; nothing was evaluated. Report the "
+                          "id exactly as you received it, with this error, and stop working on it: "
+                          "do not call any tool for it again, and do not search for, correct, or "
+                          "re-pad the id. A human checks it.")
+    elif result["status"] == "rejected":
+        result["next"] = ("Nothing was evaluated. Report this error verbatim for this run id and "
+                          "do not call any tool for it again.")
+    else:
+        result["next"] = ("This run id has its one result; never evaluate it again. When every run "
+                          "id you were given has a result, make no more tool calls of any kind and "
+                          "write your report from these results.")
+    return result, is_error, eval_id
+
+
+def _evaluate_run(args):
     """Returns (structured_result, is_error, eval_id_or_None)."""
     run_id = str(args.get("run_id", "")).strip()
     tol = str(args.get("l2_tolerance", DEFAULT_L2_TOLERANCE)).strip()
@@ -897,7 +922,8 @@ def evaluate_run(args):
                          "nothing was run" % (remote_dir, cluster))
         return base, True, None
     if not str(poll_inputs.get("job_id", "")).strip():
-        base["error"] = "the run has no scheduler job_id in poll.inputs.json; it was never submitted"
+        base["error"] = ("the run has no scheduler job_id in poll.inputs.json (the run agent never recorded one), "
+                         "so the job cannot be confirmed out of the queue; nothing was evaluated")
         return base, True, None
     try:
         if _site(target, "name") != target:
