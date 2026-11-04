@@ -57,7 +57,8 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   request that names an agent, pass it on unchanged to exactly that agent: the
   routing defaults below never replace an agent the request names. The names
   `site-runner`, `site-runner-mcp`, `evaluator`, `evaluator-mcp`,
-  `compare-agents`, `campaign-orchestrator` and `capacity-analyst` are agents,
+  `compare-agents`, `campaign-orchestrator`, `orchestrator-mcp` and
+  `capacity-analyst` are agents,
   not procedures. Call Task with `background: false` unless you have other
   independent work to do meanwhile, so you wait for the agent's result and report
   it: in a one-shot `pw code -p` run, a background agent finishes after the
@@ -247,6 +248,14 @@ the model only adds a summary with `write_summary`. Pre-approve `--allowedTools
 mcp__heat__list_runs --allowedTools mcp__heat__compare_runs --allowedTools
 mcp__heat__write_summary --allowedTools 'Bash(ls:*)' --allowedTools 'Bash(pw
 workflows runs:*)'`.
+orchestrator-mcp calls only `Task` plus two read-only tools (`load_campaign`,
+`list_runs`) and delegates only to `site-runner-mcp` and `evaluator-mcp`. Its
+server also serves `run_heat`, `poll_heat` and `evaluate_run`, because pw code
+restricts every subagent to the tools of the session that starts it (subagents
+use the parent's MCP server); see `.agents/mcp/README.md`. Pre-approve its tools and those of both subagents: `--allowedTools
+Task --allowedTools mcp__heat__load_campaign --allowedTools mcp__heat__list_runs
+--allowedTools mcp__heat__run_heat --allowedTools mcp__heat__poll_heat
+--allowedTools mcp__heat__evaluate_run`.
 SESSION DIGESTS: `SubagentStop`/`SessionEnd` hooks in `.agents/settings.json`
 run `.agents/hooks/agent_digest.py`, which writes a redacted
 `runs/<id>/agent-digest.json` (tokens, model, turns, tool-call sequence; no

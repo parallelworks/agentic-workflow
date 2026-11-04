@@ -2,6 +2,17 @@
   "permissionMode": "accept-edits",
   "subagentDepth": 2,
   "subagentConcurrency": 10,
+  "permissions": {
+    "allow": [
+      "mcp__heat__run_heat",
+      "mcp__heat__poll_heat",
+      "mcp__heat__evaluate_run",
+      "mcp__heat__load_campaign",
+      "mcp__heat__list_runs",
+      "mcp__heat__compare_runs",
+      "mcp__heat__write_summary"
+    ]
+  },
   "hooks": {
     "SubagentStop": [
       {

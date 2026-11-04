@@ -1,11 +1,13 @@
 # `heat` MCP server — run, evaluate and compare tools
 
 `heat_server.py` is a lightweight, **stdlib-only** (Python ≥ 3.9) MCP server with
-six tools. Each agent launches its own server process, and the `--tools` flag
+seven tools. Each agent launches its own server process, and the `--tools` flag
 decides which tools that process serves: the default (no flag) is `run_heat` and
 `poll_heat` for `site-runner-mcp`, exactly as before v0.4.0; `--tools
 evaluate_run` serves only `evaluate_run`, for `evaluator-mcp`; `--tools
-list_runs,compare_runs,write_summary` serves the three for `compare-agents`. A tool that is not
+list_runs,compare_runs,write_summary` serves the three for `compare-agents`; `--tools
+list_runs,load_campaign,run_heat,poll_heat,evaluate_run` serves five for
+`orchestrator-mcp` (see below for why it also serves its subagents' tools). A tool that is not
 served is absent from `tools/list` and refused by `tools/call` (`-32602`).
 
 **`run_heat(target, grid, [tol], [max_iter])`** does in code exactly what
@@ -163,6 +165,10 @@ hook command, not the script it runs.
 - **Comparison only reads:** `list_runs`, `compare_runs` and `write_summary` read
   local files (and `_site_query.py`); the only things they write are a new report
   directory with its `comparison.json` and `report.md`, and that report's summary.
+- **Campaign loading only reads:** `load_campaign` reads one file directly inside
+  `campaigns/` (no other path is accepted) and target fields through the protected
+  `_site_query.py`; it writes nothing and refuses a campaign of more than
+  `MAX_CAMPAIGN_RUNS` (16) runs.
 - **Evaluation never resubmits:** `evaluate_run` runs only poll, fetch and
   validate against the run agent's existing remote dir.
 
@@ -419,3 +425,49 @@ with trailing whitespace stripped. `evaluate_run` notes the case in
 `checks.directives.note`, and `compare_runs` lists it under
 `whitespace_only_differences`. A genuinely different block, such as the garbled
 `site-runner-gce-cpu-000000`, is still flagged.
+
+## `load_campaign` (v0.8.0, for `orchestrator-mcp`)
+`orchestrator-mcp` calls only `Task`, `mcp__heat__load_campaign` and
+`mcp__heat__list_runs` (the unchanged compare-agents tool, reused to check that
+every run id a run agent reports exists). It delegates only to `site-runner-mcp`
+and `evaluator-mcp`, so a campaign never needs a shell or a file tool.
+
+**Its server also serves `run_heat`, `poll_heat` and `evaluate_run`.** Observed on
+pw v7.131 (2026-11-04, gpt-oss-20b):
+- A custom agent's `tools:` list is a RESTRICTED SET for every subagent it starts,
+  at any depth. A subagent whose tools are all outside it is refused
+  (`subagent_type "site-runner" is unusable from this agent: its tools (ReadFile,
+  WriteFile, Bash) are all outside this agent's restricted set (...)`).
+- The check is against tools the session actually HAS, not names in `tools:`.
+  With the server serving only `list_runs,load_campaign`, Task failed with `agent
+  type "site-runner-mcp" tools (mcp__heat__run_heat, mcp__heat__poll_heat) match
+  no tools available in this session`.
+- Subagents use the PARENT's MCP server process; they do not start the one in
+  their own definition. So the orchestrator's server must serve its subagents'
+  tools, and it cannot refuse them to the orchestrator alone. Only the prompt and
+  the server's instructions (which, when `load_campaign` is served, say never to
+  call the run tools directly) keep the orchestrator from calling them.
+- A `default` subagent started from it, and the default subagents THAT one
+  started, got `unknown tool "ReadFile"` / `unknown tool "Bash"` on every call: the
+  restriction is inherited, not merely an approval prompt.
+
+**`load_campaign([campaign])`** reads `campaigns/<campaign>` (`grid-sweep`,
+`grid-sweep.yaml` and `campaigns/grid-sweep.yaml` are all accepted; anything
+outside `campaigns/` is rejected) and returns:
+- `solver`: `tol` and `max_iter` (the run_heat defaults, listed in
+  `defaults_used`, when the campaign omits them);
+- `grids` and `targets`, each target checked against `sites/sites.yaml` with its
+  `mode`, `scheduler` and `mpi_ranks`;
+- `runs`: the target x grid list to dispatch, one `site-runner-mcp` task each;
+- `skipped`: unknown targets, and grids smaller than a target's `mpi_ranks`
+  (which `run_heat` would reject), each with a reason.
+
+With no `campaign` it lists the campaign files. A campaign that expands to more
+than `MAX_CAMPAIGN_RUNS` (16) runs is rejected, so one call cannot fan out an
+unbounded number of cluster jobs. The file is parsed with PyYAML from system
+site-packages when available, else with a minimal parser for the documented
+campaign shape. Debug without MCP: `python3 -I .agents/mcp/heat_server.py
+--campaign [file]`.
+
+Note that `campaigns/grid-sweep.yaml` names `pbs-*`/`slurm-*` targets that are
+not in the current `sites/sites.yaml`, so every entry comes back in `skipped`.

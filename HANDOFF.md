@@ -41,7 +41,17 @@ siblings. Test results are in `results/agent-summary.md`.
    - `write_summary` should reject numbers that aren't in `comparison.json`.
    - The procedure is duplicated between `site-runner.md` and AGENTS.md, and
      the copies are drifting; consolidate.
-   - Give `campaign-orchestrator` the `mcp__heat__*` tools (deferred by the
-     owner).
+   - `orchestrator-mcp` now exists alongside `campaign-orchestrator` and ran
+     `campaigns/tiny.yaml` end to end on gpt-oss-20b (run
+     `site-runner-mcp-laptop-cpu-000010`, PASS as `evaluator-mcp-laptop-cpu-000007`).
+     Verified in `-p`, and again under `--permission-mode bypass-permissions`
+     (session 20261104-225140-28f02235): its tool list restricts every subagent
+     at any depth, including `default` (`unknown tool "Bash"`), and Task needs no
+     approval. Open: the orchestrator (or any subagent) could still call
+     `run_heat` directly, which only the prompt prevents; `permissions.deny`
+     behaviour is untested. Its unknown-tool stop limit is 3 (20b's third Task
+     attempt after two garbled ones succeeded in the tiny.yaml run).
+   - `agent_digest.py` marks `load_campaign` (`loaded`) and `list_runs`
+     (`listed`) results as failed calls; add those statuses to its ok list.
    - Hooks re-trust (waiting on a colleague).
    - A future agent that fills in `sites.yaml` by inspecting existing clusters.

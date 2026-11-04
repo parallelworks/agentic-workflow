@@ -21,10 +21,17 @@ own server instance exposes only that agent's tools:
                           validate.yaml, checks the record against the run's own
                           target (ranks, mode, nodes, convergence) and always writes
                           results/evaluator-mcp-<target>-<NNNNNN>/verdict.json.
+  orchestrator-mcp (--tools list_runs,load_campaign):
+  load_campaign([campaign])  read-only: reads campaigns/<file>, checks its targets
+                          against sites.yaml and returns the target x grid run list
+                          (at most MAX_CAMPAIGN_RUNS) with tol and max_iter; with no
+                          campaign, lists the campaign files. list_runs is shared
+                          with compare-agents.
 
 Launch (stdio transport; this is what each agent's mcpServers entry runs):
     python3 -I .agents/mcp/heat_server.py                        # site-runner-mcp
     python3 -I .agents/mcp/heat_server.py --tools evaluate_run   # evaluator-mcp
+    python3 -I .agents/mcp/heat_server.py --tools list_runs,load_campaign   # orchestrator-mcp
 Debug (no MCP):
     python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid> [tol] [max_iter]
         stage only, no submit; prints the staged inputs
@@ -61,7 +68,7 @@ import sys
 import time
 
 SERVER_NAME = "heat"
-SERVER_VERSION = "0.7.0"
+SERVER_VERSION = "0.8.0"
 AGENT_NAME = "site-runner-mcp"  # run-id prefix: site-runner-mcp-<target>-<NNNNNN>
 
 MODERN_VERSIONS = ["2026-07-28"]
@@ -79,6 +86,10 @@ SHARED_SITE_QUERY = os.path.join(REPO, "scripts", "_site_query.py")
 WORKFLOWS = os.path.join(REPO, "workflows")
 RUNS = os.path.join(REPO, "runs")
 RESULTS = os.path.join(REPO, "results")
+CAMPAIGNS = os.path.join(REPO, "campaigns")
+# load_campaign refuses a campaign that expands to more runs than this, so one
+# orchestrator call cannot fan out an unbounded number of cluster jobs.
+MAX_CAMPAIGN_RUNS = 16
 
 DEFAULT_TOL = "1e-3"
 DEFAULT_L2_TOLERANCE = "1e-6"  # validate.yaml's pass tolerance; NOT the solver's tol
@@ -111,11 +122,26 @@ COMPARE_INSTRUCTIONS = (
 )
 
 
+CAMPAIGN_INSTRUCTIONS = (
+    "Call mcp__heat__load_campaign once with the campaign file name; dispatch each entry of its "
+    "`runs` to the site-runner-mcp agent, passing target, grid, tol and max_iter as given."
+)
+
+
 def _instructions():
     served = [t["name"] for t in TOOLS]
+    if "load_campaign" in served:
+        # orchestrator-mcp: its server also serves the subagents' tools (pw code only
+        # lets a subagent use tools its parent's session has), but the orchestrator
+        # itself must delegate, so it never gets the run/eval instructions.
+        return CAMPAIGN_INSTRUCTIONS + (
+            " mcp__heat__run_heat, mcp__heat__poll_heat and mcp__heat__evaluate_run are served "
+            "only so your site-runner-mcp and evaluator-mcp subagents can use them; never call "
+            "them yourself.")
     return " ".join(([RUN_INSTRUCTIONS] if "run_heat" in served else [])
                     + ([EVAL_INSTRUCTIONS] if "evaluate_run" in served else [])
-                    + ([COMPARE_INSTRUCTIONS] if "compare_runs" in served else []))
+                    + ([COMPARE_INSTRUCTIONS] if "compare_runs" in served else [])
+                    + ([CAMPAIGN_INSTRUCTIONS] if "load_campaign" in served else []))
 
 RUN_TOOL = {
     "name": "run_heat",
@@ -306,8 +332,44 @@ SUMMARY_TOOL = {
     },
 }
 
+CAMPAIGN_TOOL = {
+    "name": "load_campaign",
+    "title": "Load a campaign and expand it into runs",
+    "description": (
+        "Read-only. Reads ONE campaign file from campaigns/ and returns its solver "
+        "settings (tol, max_iter), grid sizes and targets, each target checked against "
+        "sites/sites.yaml (mode, scheduler, mpi_ranks), and `runs`: the target x grid "
+        "list to dispatch, one site-runner-mcp task per entry. `skipped` lists unknown "
+        "targets and grids smaller than a target's mpi_ranks, with the reason. Call "
+        "with no campaign to list the campaign files."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "campaign": {"type": "string",
+                         "description": "A campaign file in campaigns/, e.g. grid-sweep.yaml (optional)"},
+        },
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["loaded", "listed", "rejected"]},
+            "campaigns": {"type": "array"},
+            "solver": {"type": "object"},
+            "grids": {"type": "array"},
+            "targets": {"type": "array"},
+            "runs": {"type": "array"},
+            "skipped": {"type": "array"},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
 ALL_TOOLS = {"run_heat": RUN_TOOL, "poll_heat": POLL_TOOL, "evaluate_run": EVAL_TOOL,
-             "list_runs": LIST_TOOL, "compare_runs": COMPARE_TOOL, "write_summary": SUMMARY_TOOL}
+             "list_runs": LIST_TOOL, "compare_runs": COMPARE_TOOL, "write_summary": SUMMARY_TOOL,
+             "load_campaign": CAMPAIGN_TOOL}
 # Which tools this process serves, from --tools (see __main__). The default keeps
 # the server exactly as site-runner-mcp has always launched it.
 TOOLS = [RUN_TOOL, POLL_TOOL]
@@ -1167,6 +1229,175 @@ def list_runs(args):
                     "and commit, and call compare_runs with them."}, False, None
 
 
+# --------------------------------------------------------------------------
+# load_campaign (orchestrator-mcp) — read-only expansion of campaigns/<file>
+# --------------------------------------------------------------------------
+def _campaign_files():
+    if not os.path.isdir(CAMPAIGNS):
+        return []
+    return sorted(n for n in os.listdir(CAMPAIGNS)
+                  if n.endswith((".yaml", ".yml")) and os.path.isfile(os.path.join(CAMPAIGNS, n)))
+
+
+def _scalar(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        return v[1:-1]
+    if v.startswith("[") and v.endswith("]"):
+        return [_scalar(x) for x in v[1:-1].split(",") if x.strip()]
+    return v
+
+
+def _parse_campaign_fallback(text):
+    """Minimal parser for the documented campaign shape (nested maps, `- item`
+    lists, inline [a, b] lists, scalars as strings), used only when PyYAML is
+    missing. Not a general YAML parser."""
+    root = {}
+    stack = [(-1, root)]  # (indent, container)
+    pending = None        # (indent, parent dict, key) of a `key:` with no value yet
+    for raw in text.splitlines():
+        line = raw.split(" #", 1)[0].rstrip() if not raw.lstrip().startswith("#") else ""
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        s = line.strip()
+        while len(stack) > 1 and indent <= stack[-1][0]:
+            stack.pop()
+        if s.startswith("- "):
+            if pending and indent >= pending[0]:
+                lst = []
+                pending[1][pending[2]] = lst
+                stack.append((pending[0], lst))
+                pending = None
+            if isinstance(stack[-1][1], list):
+                stack[-1][1].append(_scalar(s[2:]))
+            continue
+        if pending:
+            child = {}
+            pending[1][pending[2]] = child
+            stack.append((pending[0], child))
+            pending = None
+        if ":" not in s or not isinstance(stack[-1][1], dict):
+            continue
+        k, v = s.split(":", 1)
+        if v.strip():
+            stack[-1][1][k.strip()] = _scalar(v)
+        else:
+            pending = (indent, stack[-1][1], k.strip())
+    return root
+
+
+def _read_campaign(path):
+    with open(path) as fh:
+        text = fh.read()
+    try:
+        import yaml  # system site-packages; the server itself stays stdlib-only
+        return yaml.safe_load(text)
+    except ImportError:
+        return _parse_campaign_fallback(text)
+
+
+def _as_list(v):
+    if v is None:
+        return []
+    return list(v) if isinstance(v, (list, tuple)) else [v]
+
+
+def load_campaign(args):
+    """Returns (structured_result, is_error, None). Reads only campaigns/ and
+    sites/sites.yaml (through the protected _site_query.py); writes nothing."""
+    name = args.get("campaign")
+    if name is None or (isinstance(name, str) and not name.strip()):
+        return {"status": "listed", "campaigns": _campaign_files(),
+                "next": "Call load_campaign again with one of these file names."}, False, None
+    try:
+        if not isinstance(name, str):
+            raise Rejected("campaign must be a file name such as grid-sweep.yaml, got %r" % (name,))
+        name = name.strip()
+        if name.startswith("campaigns/"):
+            name = name[len("campaigns/"):]
+        if not name.endswith((".yaml", ".yml")):
+            name += ".yaml"
+        path = os.path.realpath(os.path.join(CAMPAIGNS, name))
+        if os.path.dirname(path) != os.path.realpath(CAMPAIGNS) or not os.path.isfile(path):
+            raise Rejected("no campaign %r in campaigns/; available: %s"
+                           % (args.get("campaign"), ", ".join(_campaign_files()) or "(none)"))
+        try:
+            data = _read_campaign(path)
+        except Exception as e:  # yaml.YAMLError, OSError
+            raise Rejected("cannot parse campaigns/%s: %s" % (name, e))
+        if not isinstance(data, dict):
+            raise Rejected("campaigns/%s is not a mapping" % name)
+        solver = data.get("solver") or {}
+        axes = data.get("axes") or {}
+        if not isinstance(solver, dict) or not isinstance(axes, dict):
+            raise Rejected("campaigns/%s: `solver` and `axes` must be mappings" % name)
+
+        defaults_used = []
+        if "tol" in solver:
+            tol = str(solver["tol"]).strip()
+        else:
+            tol, defaults_used = DEFAULT_TOL, defaults_used + ["tol"]
+        try:
+            float(tol)
+        except ValueError:
+            raise Rejected("solver.tol must be a number such as 1e-3, got %r" % tol)
+        if "max_iter" in solver:
+            max_iter = _as_int("solver.max_iter", solver["max_iter"])
+        else:
+            max_iter, defaults_used = DEFAULT_MAX_ITER, defaults_used + ["max_iter"]
+        if max_iter < 1:
+            raise Rejected("solver.max_iter must be >= 1")
+
+        grids = []
+        for g in _as_list(axes.get("grid")):
+            g = _as_int("axes.grid entry", g)
+            if g < 1:
+                raise Rejected("axes.grid entries must be >= 1, got %d" % g)
+            if g not in grids:
+                grids.append(g)
+        names = []
+        for t in _as_list(axes.get("target")):
+            if not isinstance(t, str) or not t.strip():
+                raise Rejected("axes.target entries must be target names, got %r" % (t,))
+            if t.strip() not in names:
+                names.append(t.strip())
+        if not grids or not names:
+            raise Rejected("campaigns/%s needs at least one axes.grid and one axes.target" % name)
+
+        targets, runs, skipped = [], [], []
+        for t in names:
+            if _site(t, "name") != t:  # also runs the _site_query.py parity check
+                targets.append({"name": t, "known": False})
+                skipped.append({"target": t, "grid": None,
+                                "reason": "target is not in sites/sites.yaml"})
+                continue
+            info = {"name": t, "known": True, "mode": _site(t, "mode"),
+                    "scheduler": _site(t, "scheduler"), "mpi_ranks": _maybe_int(_site(t, "mpi_ranks"))}
+            targets.append(info)
+            for g in grids:
+                ranks = info["mpi_ranks"]
+                if isinstance(ranks, int) and g < ranks:
+                    skipped.append({"target": t, "grid": g,
+                                    "reason": "grid %d < mpi_ranks %d; run_heat would reject it"
+                                              % (g, ranks)})
+                    continue
+                runs.append({"target": t, "grid": g, "tol": tol, "max_iter": max_iter})
+        if len(runs) > MAX_CAMPAIGN_RUNS:
+            raise Rejected("campaigns/%s expands to %d runs, more than the limit of %d; a human "
+                           "must split it. Nothing was dispatched."
+                           % (name, len(runs), MAX_CAMPAIGN_RUNS))
+    except Rejected as e:
+        return {"status": "rejected", "error": str(e)}, True, None
+    return {"status": "loaded", "campaign": "campaigns/" + name,
+            "name": data.get("name"), "description": data.get("description"),
+            "solver": {"tol": tol, "max_iter": max_iter, "defaults_used": defaults_used},
+            "grids": grids, "targets": targets, "runs": runs, "skipped": skipped,
+            "next": "Dispatch each entry of `runs` to the site-runner-mcp agent (one Task per "
+                    "entry) with its target, grid, tol and max_iter. Report every `skipped` "
+                    "entry with its reason."}, False, None
+
+
 def compare_runs(args):
     """Returns (structured_result, is_error, None)."""
     mcp_id = str(args.get("mcp_run_id", "")).strip()
@@ -1417,7 +1648,8 @@ def handle(method, params):
         served = [t["name"] for t in TOOLS]
         tool = {"run_heat": run_heat, "poll_heat": poll_heat, "evaluate_run": evaluate_run,
                 "list_runs": list_runs, "compare_runs": compare_runs,
-                "write_summary": write_summary}.get(name) if name in served else None
+                "write_summary": write_summary,
+                "load_campaign": load_campaign}.get(name) if name in served else None
         if tool is None:
             raise RpcError(-32602, "Unknown tool: %s" % name)
         args = params.get("arguments") or {}
@@ -1519,6 +1751,10 @@ if __name__ == "__main__":
     if len(argv) in (1, 2) and argv[0] == "--list":
         print(json.dumps(list_runs({"target": argv[1]} if len(argv) == 2 else {})[0], indent=2))
         sys.exit(0)
+    if len(argv) in (1, 2) and argv[0] == "--campaign":
+        res, err, _ = load_campaign({"campaign": argv[1]} if len(argv) == 2 else {})
+        print(json.dumps(res, indent=2))
+        sys.exit(1 if err else 0)
     if len(argv) == 3 and argv[0] == "--compare":
         res, err, _ = compare_runs({"mcp_run_id": argv[1], "shell_run_id": argv[2]})
         print(json.dumps(res, indent=2))
@@ -1532,7 +1768,7 @@ if __name__ == "__main__":
         TOOLS = [ALL_TOOLS[n] for n in names]
     elif argv:
         sys.stderr.write("usage: heat_server.py [--tools a,b] | --stage-only <target> <grid> "
-                         "[tol] [max_iter] | --evaluate <run_id> | --list [target] | "
+                         "[tol] [max_iter] | --evaluate <run_id> | --list [target] | --campaign [file] | "
                          "--compare <mcp_run_id> <shell_run_id>\n")
         sys.exit(2)
     sys.exit(serve())
