@@ -55,7 +55,11 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   name appearing only in the prompt. When a user requests multiple agents, make
   one Task to each requested agent. If you are a general subagent handed a
   request that names an agent, pass it on unchanged to exactly that agent: the
-  routing defaults below never replace an agent the request names. The names
+  routing defaults below never replace an agent the request names. The one
+  exception: if the named agent is YOU (a request naming orchestrator-mcp handed
+  to orchestrator-mcp), never delegate to yourself; do the job. Each extra hop
+  costs a level of `subagentDepth` (2), and an agent at the deepest level has no
+  Task tool. The names
   `site-runner`, `site-runner-mcp`, `evaluator`, `evaluator-mcp`,
   `compare-agents`, `campaign-orchestrator`, `orchestrator-mcp` and
   `capacity-analyst` are agents,
