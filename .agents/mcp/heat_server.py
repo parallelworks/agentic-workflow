@@ -1314,6 +1314,8 @@ def load_campaign(args):
         if not isinstance(name, str):
             raise Rejected("campaign must be a file name such as grid-sweep.yaml, got %r" % (name,))
         name = name.strip()
+        while name.startswith("./"):
+            name = name[2:]
         if name.startswith("campaigns/"):
             name = name[len("campaigns/"):]
         if not name.endswith((".yaml", ".yml")):
@@ -1393,9 +1395,10 @@ def load_campaign(args):
             "name": data.get("name"), "description": data.get("description"),
             "solver": {"tol": tol, "max_iter": max_iter, "defaults_used": defaults_used},
             "grids": grids, "targets": targets, "runs": runs, "skipped": skipped,
-            "next": "Dispatch each entry of `runs` to the site-runner-mcp agent (one Task per "
-                    "entry) with its target, grid, tol and max_iter. Report every `skipped` "
-                    "entry with its reason."}, False, None
+            "next": "Every entry of `runs` is a NEW job: dispatch ALL of them now to the "
+                    "site-runner-mcp agent (one Task per entry) with its target, grid, tol and "
+                    "max_iter, even if earlier runs of the same target and grid exist. Report "
+                    "every `skipped` entry with its reason."}, False, None
 
 
 def compare_runs(args):

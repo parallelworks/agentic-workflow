@@ -35,7 +35,11 @@ Procedure:
    names (e.g. `grid-sweep.yaml`). If the request names none, call it with no
    arguments, report the campaign files it lists, and stop: a human picks one.
    If `status` is `rejected`, report the `error` verbatim and stop.
-2. DISPATCH: for EACH entry of `runs`, one Task with
+2. DISPATCH: a campaign ALWAYS means new jobs. Your next tool calls after
+   `load_campaign` are the Tasks below, one for EVERY entry of `runs`, even if
+   runs of the same target and grid already exist from earlier sessions. Never
+   skip a run, never reuse an earlier run id or result, and never decide a run
+   is unnecessary; only a human may do that. For EACH entry of `runs`, one Task with
    `subagent_type: "site-runner-mcp"` and a prompt holding only that entry, e.g.
    "Run the heat job on target gce-cpu with grid 128, tol 1e-3, max_iter 50000."
    Use the entry's values exactly; never add, drop or change a run, a target or a
@@ -65,7 +69,9 @@ returned it, with its verdict paths. Report only results an agent returned to
 you; if a Task has not returned, say so. Never report a run as passed unless
 evaluator-mcp reported `overall` PASS for it.
 
-HONESTY ABOUT CALLS: report only tool calls that actually returned a result. A
+HONESTY ABOUT CALLS: report only tool calls that actually returned a result.
+Every run id, job id, verdict and number in your report must come from a Task or
+tool result in THIS session; you know nothing about earlier runs. A
 call that failed with `unknown tool` did not run: never describe it as a
 delegation, a submission or an attempt that "was not permitted", and never report
 a result (such as a run list) from a tool you did not call successfully. Never

@@ -5,7 +5,21 @@ What is still open after the MCP-enabled agents (`site-runner-mcp`,
 siblings. Test results are in `results/agent-summary.md`.
 
 1. **`scheduler: none` gaps:**
-   - gpu mode is untested.
+   - gpu mode is untested. The `lab-gpu` target is blocked on its toolchain:
+     `make gpu` needs `mpicc` wrapping NVIDIA's `nvc` (OpenACC `-acc
+     -Minfo=accel`). A `+cuda` OpenMPI built with gcc fails with `gcc: error:
+     unrecognized command-line option '-acc'`, and `nvcc` (CUDA Toolkit) does not
+     compile OpenACC. Next: install Spack's `nvhpc +mpi`, choosing a release whose
+     bundled CUDA the node's GPU driver supports (`nvidia-smi`), and load it in
+     the target's `env_load`. Do not fall back to GCC `-fopenacc` without NVPTX
+     offload: it builds, runs every `acc` region on the CPU, and still validates.
+   - Targets without environment modules use Spack directly in `env_load`:
+     `eval "$(<spack-root>/bin/spack load --sh /<hash>)"`. Call `spack` by path
+     (the workflow shell never sources `setup-env.sh`), use `"$(...)"` and no
+     single quotes (run.yaml writes `env_load` inside single quotes), and pick by
+     hash when a spec matches several installs. Under run.yaml's `set -u`, an
+     unset variable in `env_load` (e.g. `$MODULEPATH`) silently ends the step;
+     write `${VAR:-}`.
    - `capacity.yaml`'s `none` branch has only been run locally, not through a
      workflow.
    - Long jobs relying on `run_heat` returning at the `SUBMITTED` line are
@@ -51,7 +65,14 @@ siblings. Test results are in `results/agent-summary.md`.
      `run_heat` directly, which only the prompt prevents; `permissions.deny`
      behaviour is untested. Its unknown-tool stop limit is 3 (20b's third Task
      attempt after two garbled ones succeeded in the tiny.yaml run).
-   - `agent_digest.py` marks `load_campaign` (`loaded`) and `list_runs`
-     (`listed`) results as failed calls; add those statuses to its ok list.
+   - `agent_digest.py` (2026-11-09): a heat call now fails only on status
+     `rejected`/`failed`/`not_ready` (`loaded`, `listed`, `compared`, `written`
+     no longer count as failures); Task keeps `subagent_type` and `background`;
+     pw's own one-line errors (`Error: unknown tool "..."`, `Error executing
+     Task: ...`) are kept, truncated to 300 chars. A heat result pw prefixes
+     with `MCP tool error: ` is now parsed (it was recorded as ok with no status
+     or run_id, so failed and rejected runs got no digest). Still: a Task whose subagent
+     report starts with "Error" counts as failed. Next: a per-session digest
+     (item 2), which is the only way an orchestrator session gets a digest.
    - Hooks re-trust (waiting on a colleague).
    - A future agent that fills in `sites.yaml` by inspecting existing clusters.

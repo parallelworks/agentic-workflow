@@ -22,9 +22,14 @@ digest (same session_id), so sum costs per session_id, not per id.
 
 REDACTION: the digest keeps token usage, model, turn count, and the sequence of
 tool calls. It never copies message text or reasoning. Tool arguments are kept
-only for the heat MCP tools and for allowlisted workflow-related Bash commands;
-every other argument is replaced by "<redacted>". Tool results are reduced to an
-ok/error flag (plus status/state for the heat tools).
+only for the heat MCP tools, for allowlisted workflow-related Bash commands, and
+for Task's `subagent_type` and `background` (its prompt stays redacted); every
+other argument is replaced by "<redacted>". Tool results are reduced to an
+ok/error flag (plus status/state for the heat tools; a heat call fails only on
+status rejected, failed or not_ready). The only result text kept is an error pw
+code itself writes (`Error: unknown tool "..."`, `Error executing Task: ...`),
+truncated to 300 characters, so a refused delegation can be diagnosed without
+reading the session store.
 
 As a hook it must never disturb the session: it prints nothing to stdout and
 always exits 0 (SubagentStop is blockable, and stdout could be read as a verdict).
@@ -43,6 +48,17 @@ BASH_KEEP = ("pw workflows ", "python3 scripts/_site_query.py", "git remote get-
              "git rev-parse", "mkdir runs/", "mkdir -p runs/", "cp workflows/",
              "cp ./workflows/", "ls runs", "ls results")
 PATH_KEYS = ("file_path", "path", "pattern")
+# Heat tool statuses that mean the call did NOT do its job. Every other status
+# (submitted, polled, evaluated, listed, loaded, compared, written, ...) is a
+# success, so a new read-only tool is not miscounted as a failure.
+HEAT_FAILED = ("rejected", "failed", "not_ready")
+SUBAGENT_TYPE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+# Errors pw code itself writes about a call (never tool output or message text);
+# only these are copied, truncated, into the digest.
+UNKNOWN_TOOL_ERROR = re.compile(r'^Error: unknown tool "[^"\n]{1,200}"$')
+TASK_ERROR = re.compile(r'^Error executing Task: [^\n]+$')
+ERROR_CHARS = 300
+MCP_ERROR_PREFIX = "MCP tool error: "
 
 
 def _args(raw):
@@ -65,19 +81,38 @@ def _redact(tool, args):
         kept = {k: args[k] for k in PATH_KEYS if isinstance(args.get(k), str)
                 and not args[k].startswith(("/", "~"))}
         return kept or {"args": "<redacted>"}
+    if tool == "Task":
+        # Which agent was asked and how; the prompt and description stay redacted.
+        st = args.get("subagent_type")
+        kept = {"subagent_type": st if isinstance(st, str) and SUBAGENT_TYPE.match(st)
+                else ("<redacted>" if st is not None else None)}
+        if isinstance(args.get("background"), bool):
+            kept["background"] = args["background"]
+        return kept
     return {"args": "<redacted>"}
 
 
 def _result_info(tool, content):
     text = content if isinstance(content, str) else json.dumps(content)
     info = {"ok": not (text.startswith("Error") or "doesn't want to proceed" in text)}
+    # Only whole single-line errors in pw's own wording; a subagent report that
+    # merely starts like one has newlines or more text and is never copied.
+    if UNKNOWN_TOOL_ERROR.match(text) or (tool == "Task" and TASK_ERROR.match(text)
+                                          and len(text) <= 2 * ERROR_CHARS):
+        info["error"] = text[:ERROR_CHARS]
     if tool.startswith("mcp__heat__"):
+        # pw code prefixes a result the server marked isError with this text; the
+        # JSON after it still carries status and run_id.
+        if text.startswith(MCP_ERROR_PREFIX):
+            info["ok"] = False
+            text = text[len(MCP_ERROR_PREFIX):]
         try:
             res = json.loads(text)
             info.update({k: res.get(k) for k in ("status", "run_id", "state", "done",
                                                  "evaluator_id", "overall") if k in res})
-            info["ok"] = res.get("status") in ("submitted", "polled", "evaluated")
-        except ValueError:
+            if "status" in res:
+                info["ok"] = res["status"] not in HEAT_FAILED
+        except (ValueError, AttributeError):
             pass
     return info
 

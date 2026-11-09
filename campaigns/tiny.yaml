@@ -25,6 +25,7 @@ axes:
   # auto-selected. Comment out any target you don't want in the sweep.
   target:
     - laptop-cpu
+    - lab-cpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:

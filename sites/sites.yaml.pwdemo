@@ -1,0 +1,178 @@
+# sites.yaml — the fleet registry, organized as TARGETS.
+#
+# A "target" is a named way to run on a cluster. It is NOT the same as a cluster:
+# one physical cluster (one `pw ssh` name) can have several targets — e.g. a CPU
+# target and a GPU target — each with completely different scheduler directives.
+# Agents reference a TARGET by name; they never guess node type or ranks.
+#
+# WHY TARGETS INSTEAD OF CLUSTERS
+#   Real clusters need site-specific scheduler options (QoS, account, queue,
+#   walltime, constraints) that differ between CPU and GPU nodes and cannot be
+#   generalized into tidy fields. So each target carries a VERBATIM block of
+#   #SBATCH or #PBS lines that the tool injects untouched. The tool does not
+#   parse, validate, or derive anything from those lines — what you write is
+#   exactly what the scheduler sees.
+#
+# EXPLICIT, NEVER INFERRED
+#   - mpi_ranks: how many ranks the heat solver actually runs. This is SET HERE,
+#     never derived from the scheduler allocation. Asking the scheduler for a
+#     whole 128-core node but setting mpi_ranks: 8 runs 8 ranks. The solver never
+#     autofills to the node.
+#   - mode: cpu or gpu. GPU is used ONLY when mode is gpu. A cluster having GPU
+#     nodes does NOT cause GPU use; you must define a gpu-mode target and name it.
+#   - gpus_per_node: (gpu targets only) used solely by the solver to bind one
+#     rank per GPU. It is NOT sent to the scheduler — put your real GPU request
+#     in the directives block yourself.
+#
+# FIELDS
+#   name          : unique target name; this is what agents reference
+#   ssh_name      : the target's cluster as a PW URI, `pw://<user>/<cluster>`.
+#                   Used as the workflow `compute-clusters` input. Targets may
+#                   share one URI (same cluster, different ways to run).
+#                   You write the URI explicitly; it is not auto-generated.
+#   scheduler     : slurm | pbs   (selects directive prefix + submit/poll verbs)
+#   mode          : cpu | gpu     (gpu binds ranks to devices; nothing auto)
+#   mpi_ranks     : integer, ranks the solver runs (explicit, never inferred)
+#   gpus_per_node : integer, gpu targets only (rank->device binding)
+#   mpi_launch    : how MPI is launched (e.g. "srun --mpi=pmix", "mpirun")
+#   env_load      : verbatim commands run before build and before the MPI
+#                   launcher, injected as-is (NO prefixing). Each entry is a
+#                   full command: `module load X`, `source setup.sh`,
+#                   `. spack/share/spack/setup-env.sh && spack load foo`,
+#                   `conda activate env`, etc. May be empty.
+#   directives    : VERBATIM scheduler lines, injected as-is into the job script.
+#                   Include EVERYTHING the scheduler needs: nodes/tasks/select,
+#                   partition/queue, account, QoS, walltime, constraints, GPUs.
+#
+# ---------------------------------------------------------------------------
+# The examples below are realistic placeholders. Replace them with your real
+# targets. Note bigcluster-cpu and bigcluster-gpu share the same cluster URI
+# (pw://myuser/bigcluster) — same cluster, two ways to run, with very different directives.
+# ---------------------------------------------------------------------------
+
+targets:
+
+  # ---- Cloud cluster, CPU nodes ----
+
+  - name: gce-cpu
+    ssh_name: pw://pwdemo.stefan/gce
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-cascadelake:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  - name: aws-cpu
+    ssh_name: pw://pwdemo.stefan/aws
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-skylake_avx512:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  - name: oci-cpu
+    ssh_name: pw://pwdemo.stefan/oci
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-zen:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  - name: azure-cpu
+    ssh_name: pw://pwdemo.stefan/azure
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64_v3:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  # ---- Cloud cluster, GPU nodes ----
+
+  - name: gce-gpu
+    ssh_name: pw://pwdemo.stefan/gce
+    scheduler: slurm
+    mode: gpu
+    mpi_ranks: 1
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-cascadelake:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_gpu
+      #SBATCH --partition=gpu
+      #SBATCH --nodes=1
+      #SBATCH --ntasks-per-node=1
+      #SBATCH --time=00:30:00
+
+  # ---- Single host (no scheduler) ----
+
+  - name: laptop-cpu
+    ssh_name: pw://pwdemo.stefan/laptop
+    scheduler: none
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec.openmpi"
+    env_load:
+      - export HELLO_FROM_SITES_YAML=hello
+    directives: |
+      # Placeholder here; no scheduler
+
+  - name: lab-cpu
+    ssh_name: pw://pwdemo.stefan/labgpu
+    scheduler: none
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - eval `~/spack/bin/spack load --sh openmpi@5.0.10~cuda`
+    directives: |
+      # Placeholder here; no scheduler
+
+  - name: lab-gpu
+    ssh_name: pw://pwdemo.stefan/labgpu
+    scheduler: none
+    mode: gpu
+    mpi_ranks: 1
+    mpi_launch: "mpiexec"
+    env_load:
+      - eval `~/spack/bin/spack load --sh /oqnv7x5`
+    directives: |
+      # Placeholder here; no scheduler
+
