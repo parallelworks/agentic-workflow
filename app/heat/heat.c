@@ -185,14 +185,22 @@ int main(int argc, char **argv) {
 #ifdef _OPENACC
 #pragma acc data copy(u[0:cells]) create(u_new[0:cells]) if(want_gpu)
 #endif
-    for (iter = 0; iter < max_iter; iter++) {
+    for (iter = 0; iter < max_iter && !converged; iter++) {
         /* ---- SEAM 1: halo exchange ALWAYS through MPI ---- */
+#ifdef _OPENACC
+#pragma acc update self(u[1 * stride:stride]) if(want_gpu)
+#pragma acc update self(u[local_rows * stride:stride]) if(want_gpu)
+#endif
         MPI_Sendrecv(&u[1 * stride], grid + 2, MPI_DOUBLE, up, 0,
                      &u[(local_rows + 1) * stride], grid + 2, MPI_DOUBLE, down, 0,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         MPI_Sendrecv(&u[local_rows * stride], grid + 2, MPI_DOUBLE, down, 1,
                      &u[0], grid + 2, MPI_DOUBLE, up, 1,
                      MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+#ifdef _OPENACC
+#pragma acc update device(u[0:stride]) if(want_gpu)
+#pragma acc update device(u[(local_rows + 1) * stride:stride]) if(want_gpu)
+#endif
 
         double local_l2 = 0.0;
 #ifdef _OPENACC
@@ -221,7 +229,9 @@ int main(int argc, char **argv) {
 
         MPI_Allreduce(&local_l2, &global_l2, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
         global_l2 = sqrt(global_l2);
-        if (global_l2 < tol) { converged = true; iter++; break; }
+        /* No break: OpenACC forbids branching out of the data region; the
+         * loop test ends it, and iter++ still counts this sweep. */
+        if (global_l2 < tol) converged = true;
     }
 
     double wall = MPI_Wtime() - t0;
