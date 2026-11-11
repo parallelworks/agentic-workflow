@@ -1,0 +1,65 @@
+# buildcache.yaml — copy a Spack build cache archive from a PW bucket into the
+# cluster's $HOME and unpack it there.
+#
+#   pw workflows run -i runs/<id>/buildcache.inputs.json --name <id> runs/<id>/buildcache.yaml
+#
+# The archive is the one spack-builder's README describes:
+#   tar -czf spack-buildcache.tar.gz -C "$(dirname "$buildcache_path")" "$(basename "$buildcache_path")"
+# so it holds one top-level spack-buildcache/ directory, and unpacking it in
+# $HOME puts it at spack-builder's default buildcache_path (${HOME}/spack-buildcache),
+# where the next spack.yaml run installs from it instead of compiling.
+#
+# The copy runs ON THE CLUSTER with the cluster's own `pw` CLI (`pw buckets cp`);
+# nothing passes through the machine that launched the workflow. The workflow
+# needs `permissions` so that CLI is authorized inside the job.
+#
+# Prints one JSON line {"status": "copied", ...} at the end; the MCP tool reads it.
+
+permissions: ['*']
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      uri:
+        label: Build cache archive in a bucket (pw://<user>/<bucket>/<name>.tar.gz)
+        type: string
+        optional: false
+
+jobs:
+  copy:
+    ssh:
+      remoteHost: ${{ inputs.cluster.ip }}
+    steps:
+      - name: Copy and unpack the build cache
+        run: |
+          set -euo pipefail
+          URI='${{ inputs.uri }}'
+          # Same rule the MCP tool applies, repeated for hand-run workflows.
+          if ! printf '%s' "$URI" | grep -Eq '^pw://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tar\.gz$' || printf '%s' "$URI" | grep -Eq '/\.+(/|$)'; then
+            echo "buildcache: uri must look like pw://<user>/<bucket>/<name>.tar.gz" >&2; exit 2
+          fi
+          BASE="${URI##*/}"
+          command -v pw >/dev/null 2>&1 || export PATH="${PATH}:${HOME}/pw"
+          command -v pw >/dev/null 2>&1 || { echo "buildcache: no pw CLI on this cluster" >&2; exit 3; }
+
+          cd "$HOME"
+          echo "=== COPY === $URI -> \$HOME/$BASE"
+          pw buckets cp "$URI" "$BASE"
+          [ -s "$BASE" ] || { echo "buildcache: $BASE is missing or empty after the copy" >&2; exit 4; }
+
+          # Refuse an archive that would write outside $HOME's subtree.
+          MEMBERS="$(tar -tzf "$BASE")"
+          if printf '%s\n' "$MEMBERS" | grep -Eq '^/|(^|/)\.\.(/|$)'; then
+            echo "buildcache: archive has absolute or '..' paths; not unpacked" >&2; exit 5
+          fi
+          TOP="$(printf '%s\n' "$MEMBERS" | sed 's#^\./##; s#/.*##' | sort -u | grep -v '^$' | paste -sd, -)"
+
+          echo "=== UNPACK === tar -xzf $BASE in \$HOME (top level: $TOP)"
+          tar -xzf "$BASE" --no-same-owner
+          BYTES="$(stat -c %s "$BASE")"
+          printf '{"status":"copied","uri":"%s","archive":"$HOME/%s","bytes":%s,"top_level":"%s","files":%s}\n' \
+            "$URI" "$BASE" "$BYTES" "$TOP" "$(printf '%s\n' "$MEMBERS" | grep -vc '/$' || true)"

@@ -83,6 +83,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#ifdef _OPENACC
+#include <openacc.h>
+#endif
 
 /* -------- defaults (all overridable on the command line) -------- */
 #define DEFAULT_GRID     512

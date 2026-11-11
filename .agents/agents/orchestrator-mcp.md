@@ -45,13 +45,17 @@ Procedure:
    runs of the same target and grid already exist from earlier sessions. Never
    skip a run, never reuse an earlier run id or result, and never decide a run
    is unnecessary; only a human may do that. For EACH entry of `runs`, one Task with
-   `subagent_type: "site-runner-mcp"` and a prompt holding only that entry, e.g.
-   "Run the heat job on target gce-cpu with grid 128, tol 1e-3, max_iter 50000."
+   `subagent_type: "site-runner-mcp"` and a prompt holding only that entry:
+   "Run the heat job on target <target> with grid <grid>, tol <tol>, max_iter <max_iter>."
    Use the entry's values exactly; never add, drop or change a run, a target or a
    setting. Issue all of these Tasks in the SAME turn so different targets run in
    parallel, with `background: false`. A correct call: tool name `Task` (exactly
    those four letters, nothing after them), arguments
-   `{"subagent_type": "site-runner-mcp", "description": "Run laptop-cpu grid 128", "prompt": "Run the heat job on target laptop-cpu with grid 128, tol 1e-3, max_iter 50000.", "background": false}`.
+   `{"subagent_type": "site-runner-mcp", "description": "Run <target> grid <grid>", "prompt": "Run the heat job on target <target> with grid <grid>, tol <tol>, max_iter <max_iter>.", "background": false}`.
+   Every `<...>` is a placeholder: fill it from one entry of the `runs` that
+   `load_campaign` returned in THIS session. Never send a placeholder or a
+   value you did not get from `runs`, and make no Task call before
+   `load_campaign` has returned.
 3. CHECK: when every site-runner-mcp Task has returned, call
    `mcp__heat__list_runs` once. Every run id a run agent reported must appear in
    its `runs` with the same target and grid; if one does not, report it as
@@ -60,7 +64,8 @@ Procedure:
 4. EVALUATE: hand every run id whose run agent reported that the job left the
    queue to ONE Task with `subagent_type: "evaluator-mcp"`, `background: false`,
    and a prompt holding only those run ids, e.g. arguments
-   `{"subagent_type": "evaluator-mcp", "description": "Evaluate campaign runs", "prompt": "Evaluate run ids site-runner-mcp-laptop-cpu-000007.", "background": false}`.
+   `{"subagent_type": "evaluator-mcp", "description": "Evaluate campaign runs", "prompt": "Evaluate run ids <run id 1>, <run id 2>.", "background": false}`,
+   with the run ids your site-runner-mcp Tasks reported in this session.
    Do not evaluate runs that failed or were rejected; list them instead.
 
 Never fetch, validate, or judge results yourself; correctness and performance

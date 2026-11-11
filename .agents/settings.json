@@ -10,7 +10,10 @@
       "mcp__heat__load_campaign",
       "mcp__heat__list_runs",
       "mcp__heat__compare_runs",
-      "mcp__heat__write_summary"
+      "mcp__heat__write_summary",
+      "mcp__heat__copy_buildcache",
+      "mcp__heat__run_spack",
+      "mcp__heat__spack_status"
     ]
   },
   "hooks": {

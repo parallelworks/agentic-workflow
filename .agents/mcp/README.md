@@ -1,13 +1,14 @@
 # `heat` MCP server — run, evaluate and compare tools
 
 `heat_server.py` is a lightweight, **stdlib-only** (Python ≥ 3.9) MCP server with
-seven tools. Each agent launches its own server process, and the `--tools` flag
+ten tools. Each agent launches its own server process, and the `--tools` flag
 decides which tools that process serves: the default (no flag) is `run_heat` and
 `poll_heat` for `site-runner-mcp`, exactly as before v0.4.0; `--tools
 evaluate_run` serves only `evaluate_run`, for `evaluator-mcp`; `--tools
 list_runs,compare_runs,write_summary` serves the three for `compare-agents`; `--tools
 list_runs,load_campaign,run_heat,poll_heat,evaluate_run` serves five for
-`orchestrator-mcp` (see below for why it also serves its subagents' tools). A tool that is not
+`orchestrator-mcp` (see below for why it also serves its subagents' tools); `--tools
+copy_buildcache,run_spack,spack_status` serves three for `site-prep-mcp`. A tool that is not
 served is absent from `tools/list` and refused by `tools/call` (`-32602`).
 
 **`run_heat(target, grid, [tol], [max_iter])`** does in code exactly what
@@ -471,3 +472,52 @@ campaign shape. Debug without MCP: `python3 -I .agents/mcp/heat_server.py
 
 Note that `campaigns/grid-sweep.yaml` names `pbs-*`/`slurm-*` targets that are
 not in the current `sites/sites.yaml`, so every entry comes back in `skipped`.
+
+## `copy_buildcache`, `run_spack`, `spack_status` (v0.9.0, for `site-prep-mcp`)
+Site preparation, outside the campaign flow. Ids are
+`site-prep-mcp-<target>-<NNNNNN>`, one per tool call that starts a workflow,
+staged under `runs/<id>/` with the workflow, its inputs and a record.
+
+**`copy_buildcache(target, uri)`** stages `workflows/buildcache.yaml` and waits
+(up to 9 min) for it. On the cluster the workflow runs `pw buckets cp <uri>
+<basename>` in `$HOME`, refuses an archive with absolute or `..` members, and runs
+`tar -xzf <basename>`; it prints one `{"status":"copied",...}` line with the
+archive's size and top-level directories. The uri must match
+`pw://<user>/<bucket>/[<dir>/...]<name>.tar.gz` (letters, digits, `. _ -`; no `.`
+or `..` segments); anything else, `.tag.gz` included, is rejected before
+anything is staged. The check is repeated in the workflow. Record: `prep.json`.
+The copy runs with the cluster's own `pw` CLI, so the workflow declares
+`permissions: ['*']`; the server itself still only runs `pw workflows run|runs`.
+An archive made the way spack-builder's README describes (`tar -czf ... -C
+$(dirname $buildcache_path) $(basename $buildcache_path)`) unpacks to
+`~/spack-buildcache`, spack-builder's default `buildcache_path`.
+
+**`run_spack(target)`** stages `workflows/spack.yaml`, a wrapper whose one step
+`uses: github/parallelworks/workflows@canary` with `$yaml:
+workflows/spack-builder/yamls/general.yaml` (spack-builder is called, not copied).
+Inputs come from the target:
+- `scheduler: none` → `scheduler: false` (inspect and build on the login node);
+- slurm → the `#SBATCH --partition`/`-p` and `--time`/`-t` lines become
+  spack-builder's `partition` and inspection `time`, and the other lines go to
+  `slurm.scheduler_directives` verbatim;
+- pbs → all lines go to `pbs.scheduler_directives`;
+- `build_gpu` is true for a gpu-mode target.
+Every other spack-builder input keeps its default (`~/spack`,
+`~/spack-buildcache`, `~/pw/software/modules`, build on the login node). It
+waits 20 s to catch a run that fails at once, writes `submit.json` and returns
+`started`. spack-builder checks out its own `app/` from branch `canary`, so the
+build scripts follow canary whatever ref the wrapper pins. Debug the mapping
+without running anything: `python3 -I .agents/mcp/heat_server.py --spack-inputs
+<target>`.
+
+**`spack_status(run_id)`** is read-only (`pw workflows runs view`, plus
+`runs logs --failed` on a failure). It checks every 30 s for up to 7 min,
+returning early when the run ends, with `state`, `jobs`, `done` and
+`succeeded`, and appends each check to `statuses.jsonl`. A run id from any other
+tool is rejected. On success spack-builder leaves a placeholder endpoint
+`spack-builder-<run slug>` running; the server cannot remove it (`pw endpoints`
+is not allowlisted), so a human deletes it.
+
+Untested against a cluster as of 2026-11-10; in particular, that the subworkflow
+fills spack-builder inputs the wrapper does not pass with their defaults.
+

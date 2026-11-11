@@ -16,6 +16,9 @@ Writes runs/<id>/agent-digest.json for every run or evaluation the session CREAT
   - site-runner:     a Bash `pw workflows run ... --name <id> ... run.yaml` command
   - evaluator-mcp:   an evaluate_run result carrying the evaluator_id
   - evaluator:       a Bash `pw workflows run ... --name <eval-id>-fetch|-validate ...`
+  - site-prep-mcp:   a run_spack or copy_buildcache result carrying the run_id
+A tool result stored as a list of text parts (claude-code/opus) is read as its
+joined text, the same as a plain string result.
 Sessions that merely mention an id (compare-agents, the main agent) produce
 nothing. One session can create several ids; each gets the same SESSION-level
 digest (same session_id), so sum costs per session_id, not per id.
@@ -43,6 +46,7 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RUNS = os.path.join(REPO, "runs")
 RUN_ID = re.compile(r"\b(site-runner(?:-mcp)?-[A-Za-z0-9._-]+?-\d{6})\b")
+PREP_ID = re.compile(r"site-prep-mcp-[A-Za-z0-9._-]+?-\d{6}")
 EVAL_STEP = re.compile(r"^(evaluator-[A-Za-z0-9._-]+?-\d{6})-(?:fetch|validate)$")
 BASH_KEEP = ("pw workflows ", "python3 scripts/_site_query.py", "git remote get-url",
              "git rev-parse", "mkdir runs/", "mkdir -p runs/", "cp workflows/",
@@ -92,8 +96,21 @@ def _redact(tool, args):
     return {"args": "<redacted>"}
 
 
+def _content_text(content):
+    """A tool result's text. Some providers (seen with claude-code/opus) store it as
+    a list of parts, [{"type": "text", "text": "..."}], instead of a string; join
+    the text parts so the result parses the same either way."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and all(
+            isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+            for p in content):
+        return "".join(p["text"] for p in content)
+    return json.dumps(content)
+
+
 def _result_info(tool, content):
-    text = content if isinstance(content, str) else json.dumps(content)
+    text = _content_text(content)
     info = {"ok": not (text.startswith("Error") or "doesn't want to proceed" in text)}
     # Only whole single-line errors in pw's own wording; a subagent report that
     # merely starts like one has newlines or more text and is never copied.
@@ -173,6 +190,9 @@ def digest(transcript, agent_type=None, event=None):
                             created[call["run_id"]] = "site-runner-mcp"
                         if call["tool"] == "mcp__heat__evaluate_run" and call.get("evaluator_id"):
                             created[call["evaluator_id"]] = "evaluator-mcp"
+                        if call["tool"] in ("mcp__heat__run_spack", "mcp__heat__copy_buildcache") \
+                                and PREP_ID.fullmatch(str(call.get("run_id") or "")):
+                            created[call["run_id"]] = "site-prep-mcp"
 
     return {
         "captured_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

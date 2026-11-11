@@ -27,16 +27,30 @@ own server instance exposes only that agent's tools:
                           (at most MAX_CAMPAIGN_RUNS) with tol and max_iter; with no
                           campaign, lists the campaign files. list_runs is shared
                           with compare-agents.
+  site-prep-mcp (--tools copy_buildcache,run_spack,spack_status), not part of a
+  campaign; site preparation is run per target when a human asks:
+  copy_buildcache(target, uri)  runs workflows/buildcache.yaml: on the cluster,
+                          `pw buckets cp` a pw://<user>/<bucket>/<name>.tar.gz into
+                          $HOME and `tar -xzf` it. Waits for it (a few minutes).
+  run_spack(target)       STARTS workflows/spack.yaml, which calls spack-builder
+                          (parallelworks/workflows@canary) as a subworkflow, with
+                          scheduler, partition, directives and build_gpu from the
+                          target. Returns at start; a build can take hours.
+  spack_status(run_id)    read-only: `pw workflows runs view` of that build, waiting
+                          a few minutes for it to finish. Never starts anything.
 
 Launch (stdio transport; this is what each agent's mcpServers entry runs):
     python3 -I .agents/mcp/heat_server.py                        # site-runner-mcp
     python3 -I .agents/mcp/heat_server.py --tools evaluate_run   # evaluator-mcp
     python3 -I .agents/mcp/heat_server.py --tools list_runs,load_campaign   # orchestrator-mcp
+    python3 -I .agents/mcp/heat_server.py --tools copy_buildcache,run_spack,spack_status   # site-prep-mcp
 Debug (no MCP):
     python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid> [tol] [max_iter]
         stage only, no submit; prints the staged inputs
     python3 -I .agents/mcp/heat_server.py --evaluate <run_id>
         runs evaluate_run once (this DOES run the poll/fetch/validate workflows)
+    python3 -I .agents/mcp/heat_server.py --spack-inputs <target>
+        prints the spack.yaml inputs run_spack would stage; stages and runs nothing
 
 It lives under .agents/ because pw code makes every agent edit there ask a human
 first (fails in -p), so no agent can rewrite the server or its _site_query.py.
@@ -68,7 +82,7 @@ import sys
 import time
 
 SERVER_NAME = "heat"
-SERVER_VERSION = "0.8.0"
+SERVER_VERSION = "0.9.0"
 AGENT_NAME = "site-runner-mcp"  # run-id prefix: site-runner-mcp-<target>-<NNNNNN>
 
 MODERN_VERSIONS = ["2026-07-28"]
@@ -128,6 +142,15 @@ CAMPAIGN_INSTRUCTIONS = (
 )
 
 
+PREP_INSTRUCTIONS = (
+    "Site preparation, one target at a time. To copy a build cache, call "
+    "mcp__heat__copy_buildcache once with the target and the bucket uri. To build the Spack "
+    "stack, call mcp__heat__run_spack once with the target, then mcp__heat__spack_status with the "
+    "run_id it returned. mcp__heat__run_spack always starts a NEW build; only "
+    "mcp__heat__spack_status checks one."
+)
+
+
 def _instructions():
     served = [t["name"] for t in TOOLS]
     if "load_campaign" in served:
@@ -141,7 +164,9 @@ def _instructions():
     return " ".join(([RUN_INSTRUCTIONS] if "run_heat" in served else [])
                     + ([EVAL_INSTRUCTIONS] if "evaluate_run" in served else [])
                     + ([COMPARE_INSTRUCTIONS] if "compare_runs" in served else [])
-                    + ([CAMPAIGN_INSTRUCTIONS] if "load_campaign" in served else []))
+                    + ([CAMPAIGN_INSTRUCTIONS] if "load_campaign" in served else [])
+                    + ([PREP_INSTRUCTIONS] if set(served) & {"copy_buildcache", "run_spack",
+                                                             "spack_status"} else []))
 
 RUN_TOOL = {
     "name": "run_heat",
@@ -367,9 +392,110 @@ CAMPAIGN_TOOL = {
     },
 }
 
+COPY_CACHE_TOOL = {
+    "name": "copy_buildcache",
+    "title": "Copy a Spack build cache from a bucket to a target's cluster",
+    "description": (
+        "Copy ONE Spack build cache archive from a PW bucket into $HOME on the cluster of ONE "
+        "target (a name from sites/sites.yaml) and unpack it there with tar -xzf, through the "
+        "buildcache.yaml workflow. uri must be pw://<user>/<bucket>/<name>.tar.gz. Waits for "
+        "the copy to finish (a few minutes) and returns status copied or failed."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string", "description": "Target name, e.g. gce-cpu"},
+            "uri": {"type": "string",
+                    "description": "Bucket object, e.g. pw://myuser/mybucket/spack-buildcache.tar.gz"},
+        },
+        "required": ["target", "uri"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["copied", "rejected", "failed"]},
+            "run_id": {"type": ["string", "null"]},
+            "target": {"type": "string"},
+            "workflow_run": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "target"],
+    },
+}
+
+RUN_SPACK_TOOL = {
+    "name": "run_spack",
+    "title": "Start a Spack stack build on a target's cluster",
+    "description": (
+        "START the Spack stack build (the spack-builder workflow, through spack.yaml) on the "
+        "cluster of ONE target (a name from sites/sites.yaml). Scheduler, partition, "
+        "directives and GPU build come from the target. Returns run_id right after the "
+        "build starts; it does NOT wait. A build takes minutes with a matching build cache "
+        "and hours without one. Call mcp__heat__spack_status with the run_id next. Every "
+        "call starts a NEW build: never call it to check on a build."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "target": {"type": "string", "description": "Target name, e.g. gce-cpu"},
+        },
+        "required": ["target"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["started", "rejected", "failed"]},
+            "run_id": {"type": ["string", "null"]},
+            "target": {"type": "string"},
+            "workflow_run": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "target"],
+    },
+}
+
+SPACK_STATUS_TOOL = {
+    "name": "spack_status",
+    "title": "Check a Spack stack build",
+    "description": (
+        "Read-only: report the state of a build that mcp__heat__run_spack started. Pass the "
+        "run_id it returned. Waits up to a few minutes and returns as soon as the build has "
+        "finished (done true; succeeded says whether it worked). If done is false the "
+        "build is still running. Never starts anything."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string",
+                       "description": "The run_id mcp__heat__run_spack returned, e.g. site-prep-mcp-gce-cpu-000002"},
+        },
+        "required": ["run_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["checked", "rejected", "failed"]},
+            "run_id": {"type": "string"},
+            "workflow_run": {"type": ["string", "null"]},
+            "state": {"type": ["string", "null"]},
+            "done": {"type": "boolean"},
+            "succeeded": {"type": "boolean"},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "run_id", "done"],
+    },
+}
+
 ALL_TOOLS = {"run_heat": RUN_TOOL, "poll_heat": POLL_TOOL, "evaluate_run": EVAL_TOOL,
              "list_runs": LIST_TOOL, "compare_runs": COMPARE_TOOL, "write_summary": SUMMARY_TOOL,
-             "load_campaign": CAMPAIGN_TOOL}
+             "load_campaign": CAMPAIGN_TOOL, "copy_buildcache": COPY_CACHE_TOOL,
+             "run_spack": RUN_SPACK_TOOL, "spack_status": SPACK_STATUS_TOOL}
 # Which tools this process serves, from --tools (see __main__). The default keeps
 # the server exactly as site-runner-mcp has always launched it.
 TOOLS = [RUN_TOOL, POLL_TOOL]
@@ -1602,6 +1728,255 @@ def write_summary(args):
 
 
 # --------------------------------------------------------------------------
+# copy_buildcache / run_spack / spack_status (site-prep-mcp)
+# --------------------------------------------------------------------------
+PREP_AGENT = "site-prep-mcp"  # id prefix: site-prep-mcp-<target>-<NNNNNN>
+PREP_ID_RE = re.compile(r"^%s-[A-Za-z0-9._-]+-\d{6}$" % re.escape(PREP_AGENT))
+# pw://<user>/<bucket>/[<dir>/...]<name>.tar.gz; the charset also keeps the value
+# safe inside the single quotes buildcache.yaml puts it in.
+BUCKET_URI_RE = re.compile(r"^pw://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/([A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.tar\.gz$")
+COPY_BUDGET_SECONDS = 540      # stays under the agent's 10m MCP timeout
+SPACK_START_SECONDS = 20       # long enough to catch a run rejected at start
+SPACK_STATUS_BUDGET_SECONDS = 420
+SPACK_STATUS_INTERVAL_SECONDS = 30
+SBATCH_PARTITION_RE = re.compile(r"^#SBATCH\s+(?:--partition[= ]\s*|-p\s*)(\S+)\s*$")
+SBATCH_TIME_RE = re.compile(r"^#SBATCH\s+(?:--time[= ]\s*|-t\s*)(\S+)\s*$")
+
+
+def _prep_target(args):
+    """Resolve the target fields site-prep needs, or raise Rejected."""
+    target = args.get("target")
+    if not isinstance(target, str) or not target.strip():
+        raise Rejected("target is required (a name from sites/sites.yaml)")
+    target = target.strip()
+    if _site(target, "name") != target:
+        raise Rejected("unknown target %r; valid targets: %s"
+                       % (target, ", ".join(_target_names()) or "(none found)"))
+    t = {f: _site(target, f) for f in ("ssh_name", "scheduler", "mode", "directives")}
+    t["name"] = target
+    if t["scheduler"] not in ("slurm", "pbs", "none"):
+        raise Rejected("target %r has scheduler %r; expected slurm, pbs or none" % (target, t["scheduler"]))
+    if t["mode"] not in ("cpu", "gpu"):
+        raise Rejected("target %r has mode %r; expected cpu or gpu" % (target, t["mode"]))
+    return t
+
+
+def spack_inputs(t):
+    """spack.yaml inputs for a resolved target. A slurm target's --partition and
+    --time lines become spack-builder's partition and time fields (so they are not
+    requested twice); every other directive line is passed on verbatim."""
+    inputs = {"cluster": t["ssh_name"], "scheduler_type": t["scheduler"],
+              "scheduler": t["scheduler"] != "none", "build_gpu": t["mode"] == "gpu"}
+    if t["scheduler"] == "none":
+        return inputs
+    lines, partition, walltime = [], "", ""
+    for line in t["directives"].splitlines():
+        s = line.strip()
+        mp = SBATCH_PARTITION_RE.match(s) if t["scheduler"] == "slurm" else None
+        mt = SBATCH_TIME_RE.match(s) if t["scheduler"] == "slurm" else None
+        if mp:
+            partition = mp.group(1)
+        elif mt:
+            walltime = mt.group(1)
+        elif s:
+            lines.append(line)
+    inputs["directives"] = "\n".join(lines)
+    if t["scheduler"] == "slurm":
+        inputs["partition"] = partition
+        if walltime:
+            inputs["time"] = walltime
+    return inputs
+
+
+def _stage_prep(t, op, inputs):
+    run_id = allocate_dir(PREP_AGENT, t["name"])
+    rdir = os.path.join(RUNS, run_id)
+    shutil.copyfile(os.path.join(WORKFLOWS, op + ".yaml"), os.path.join(rdir, op + ".yaml"))
+    with open(os.path.join(rdir, op + ".inputs.json"), "w") as fh:
+        json.dump(inputs, fh, indent=2)
+        fh.write("\n")
+    return run_id, rdir
+
+
+def _start(run_id, op):
+    """`pw workflows run` the staged op; returns (record, slug)."""
+    rel = "runs/%s" % run_id
+    argv = ["workflows", "run", "-i", "%s/%s.inputs.json" % (rel, op), "--name", run_id,
+            "-o", "json", "%s/%s.yaml" % (rel, op)]
+    record = {"run_id": run_id, "op": op, "argv": ["pw"] + argv, "started": _now()}
+    rc, out, err = _pw(argv, timeout=120)
+    slug = _find_slug(out)
+    record.update(exit_code=rc, workflow_run=slug)
+    if not slug:
+        record.update(status="failed", error=("pw workflows run did not return a run slug: "
+                                              + (err or out).strip()[-1500:]))
+    return record, slug
+
+
+def _view(slug):
+    rc, out, _ = _pw(["workflows", "runs", "view", slug, "-o", "json"], timeout=60)
+    try:
+        return json.loads(out) if rc == 0 else {}
+    except ValueError:
+        return {}
+
+
+def _failed_tail(slug):
+    _, lout, _ = _pw(["workflows", "runs", "logs", "--failed", "--tail", "20", slug], timeout=60)
+    return lout.strip()[-2500:]
+
+
+def _write_json(path, obj):
+    with open(path, "w") as fh:
+        json.dump(obj, fh, indent=2)
+        fh.write("\n")
+
+
+def copy_buildcache(args):
+    """Returns (structured_result, is_error, run_id_or_None)."""
+    target = str(args.get("target", "")).strip()
+    base = {"status": "rejected", "run_id": None, "target": target, "workflow_run": None,
+            "next": None, "error": None}
+    uri = args.get("uri")
+    try:
+        t = _prep_target(args)
+        if (not isinstance(uri, str) or not BUCKET_URI_RE.match(uri.strip())
+                or any(seg.strip(".") == "" for seg in uri.strip()[5:].split("/"))):
+            raise Rejected("uri must be a bucket object ending in .tar.gz, in the form "
+                           "pw://<user>/<bucket>/<name>.tar.gz (letters, digits, . _ - only; no . or .. "
+                           "segments); got %r. "
+                           "Nothing was copied." % (uri,))
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    uri = uri.strip()
+    run_id, rdir = _stage_prep(t, "buildcache", {"cluster": t["ssh_name"], "uri": uri})
+    base.update(run_id=run_id, cluster=t["ssh_name"], uri=uri)
+    try:
+        rec, slug = _start(run_id, "buildcache")
+        if slug:
+            view = _wait_terminal(slug, COPY_BUDGET_SECONDS)
+            rec["workflow_status"] = view.get("status")
+            if view.get("status") == "completed":
+                _, lout, _ = _pw(["workflows", "runs", "logs", "--job", "copy", "--tail", "20", slug],
+                                 timeout=60)
+                found = _json_line(lout, "status")
+                if found and found.get("status") == "copied":
+                    rec.update(status="copied", copy=found)
+                else:
+                    rec.update(status="failed", error="workflow %s completed but printed no copied line"
+                                                      % slug)
+            elif view.get("status") in TERMINAL:
+                rec.update(status="failed", error="workflow %s ended %s; failed step log tail:\n%s"
+                                                  % (slug, view.get("status"), _failed_tail(slug)))
+            else:
+                rec.update(status="failed",
+                           error="workflow %s was still %s after %d s; check it with "
+                                 "`pw workflows runs view %s`" % (slug, view.get("status") or "unknown",
+                                                                  COPY_BUDGET_SECONDS, slug))
+    except Exception as e:  # pw missing, timeout, refused verb...
+        rec = {"run_id": run_id, "op": "buildcache", "status": "failed", "error": str(e)}
+    rec["finished"] = _now()
+    _write_json(os.path.join(rdir, "prep.json"), rec)
+    base.update(status=rec["status"], workflow_run=rec.get("workflow_run"), error=rec.get("error"))
+    if rec["status"] == "copied":
+        base["copy"] = rec["copy"]
+        base["next"] = ("The build cache is unpacked in $HOME on the cluster. Report the run id and "
+                        "the copy line and stop.")
+    else:
+        base["next"] = "Report the error verbatim and stop."
+    return base, rec["status"] != "copied", run_id
+
+
+def run_spack(args):
+    """Returns (structured_result, is_error, run_id_or_None)."""
+    target = str(args.get("target", "")).strip()
+    base = {"status": "rejected", "run_id": None, "target": target, "workflow_run": None,
+            "next": None, "error": None}
+    try:
+        t = _prep_target(args)
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    inputs = spack_inputs(t)
+    run_id, rdir = _stage_prep(t, "spack", inputs)
+    base.update(run_id=run_id, cluster=t["ssh_name"], scheduler=t["scheduler"], mode=t["mode"],
+                build_gpu=inputs["build_gpu"])
+    try:
+        rec, slug = _start(run_id, "spack")
+        if slug:
+            time.sleep(SPACK_START_SECONDS)
+            view = _view(slug)
+            rec["workflow_status"] = view.get("status")
+            if view.get("status") in TERMINAL and view.get("status") != "completed":
+                rec.update(status="failed", error="workflow %s ended %s; failed step log tail:\n%s"
+                                                  % (slug, view.get("status"), _failed_tail(slug)))
+            else:
+                rec["status"] = "started"
+    except Exception as e:
+        rec = {"run_id": run_id, "op": "spack", "status": "failed", "error": str(e)}
+    rec["finished"] = _now()
+    _write_json(os.path.join(rdir, "submit.json"), rec)
+    base.update(status=rec["status"], workflow_run=rec.get("workflow_run"), error=rec.get("error"))
+    if rec["status"] == "started":
+        base["next"] = ("The build has started but is NOT finished; do not report yet. Your next "
+                        "call must be mcp__heat__spack_status with run_id %s. Never call "
+                        "mcp__heat__run_spack again for this build." % run_id)
+    else:
+        base["next"] = "Report the error verbatim and stop."
+    return base, rec["status"] != "started", run_id
+
+
+def spack_status(args):
+    """Returns (structured_result, is_error, run_id_or_None). Read-only: only
+    `pw workflows runs view|logs` on the run that run_spack started."""
+    run_id = str(args.get("run_id", "")).strip()
+    base = {"status": "rejected", "run_id": run_id, "workflow_run": None, "state": None,
+            "done": False, "succeeded": False, "next": None, "error": None}
+    rdir = os.path.join(RUNS, run_id)
+    rec = _read_json(os.path.join(rdir, "submit.json")) if PREP_ID_RE.match(run_id) else None
+    slug = rec.get("workflow_run") if isinstance(rec, dict) and rec.get("op") == "spack" else None
+    if not slug:
+        base["error"] = ("unknown run_id %r: pass the run_id that mcp__heat__run_spack returned for a "
+                         "started build (e.g. %s-gce-cpu-000002)" % (run_id, PREP_AGENT))
+        return base, True, None
+    base["workflow_run"] = slug
+    log_path = os.path.join(rdir, "statuses.jsonl")
+    deadline = time.time() + SPACK_STATUS_BUDGET_SECONDS
+    checks = 0
+    try:
+        while True:
+            checks += 1
+            view = _view(slug)
+            state = view.get("status")
+            jobs = {name: job.get("status") for name, job in (view.get("executedJobs") or {}).items()
+                    if isinstance(job, dict)}
+            with open(log_path, "a") as fh:
+                fh.write(json.dumps({"ts": _now(), "state": state, "jobs": jobs},
+                                    separators=(",", ":")) + "\n")
+            if state in TERMINAL or time.time() + SPACK_STATUS_INTERVAL_SECONDS > deadline:
+                break
+            time.sleep(SPACK_STATUS_INTERVAL_SECONDS)
+    except Exception as e:
+        base.update(status="failed", error=str(e))
+        return base, True, run_id
+    done = state in TERMINAL
+    base.update(status="checked", state=state, jobs=jobs, done=done,
+                succeeded=(state == "completed"), checks_this_call=checks)
+    if state == "completed":
+        base["next"] = ("The build succeeded. Report it and stop. spack-builder leaves a placeholder "
+                        "endpoint named spack-builder-<run slug> running; tell the user it can be "
+                        "deleted with `pw endpoints delete`.")
+    elif done:
+        base["error"] = "workflow %s ended %s; failed step log tail:\n%s" % (slug, state, _failed_tail(slug))
+        base["next"] = "The build failed. Report the error verbatim and stop."
+    else:
+        base["next"] = ("The build is still %s. Call mcp__heat__spack_status again with run_id %s, "
+                        "or stop if your instructions say so." % (state or "unknown", run_id))
+    return base, False, run_id
+
+
+# --------------------------------------------------------------------------
 # JSON-RPC / MCP protocol
 # --------------------------------------------------------------------------
 class RpcError(Exception):
@@ -1652,7 +2027,8 @@ def handle(method, params):
         tool = {"run_heat": run_heat, "poll_heat": poll_heat, "evaluate_run": evaluate_run,
                 "list_runs": list_runs, "compare_runs": compare_runs,
                 "write_summary": write_summary,
-                "load_campaign": load_campaign}.get(name) if name in served else None
+                "load_campaign": load_campaign, "copy_buildcache": copy_buildcache,
+                "run_spack": run_spack, "spack_status": spack_status}.get(name) if name in served else None
         if tool is None:
             raise RpcError(-32602, "Unknown tool: %s" % name)
         args = params.get("arguments") or {}
@@ -1758,6 +2134,13 @@ if __name__ == "__main__":
         res, err, _ = load_campaign({"campaign": argv[1]} if len(argv) == 2 else {})
         print(json.dumps(res, indent=2))
         sys.exit(1 if err else 0)
+    if len(argv) == 2 and argv[0] == "--spack-inputs":
+        try:
+            print(json.dumps(spack_inputs(_prep_target({"target": argv[1]})), indent=2))
+        except Rejected as e:
+            print(json.dumps({"status": "rejected", "error": str(e)}, indent=2))
+            sys.exit(1)
+        sys.exit(0)
     if len(argv) == 3 and argv[0] == "--compare":
         res, err, _ = compare_runs({"mcp_run_id": argv[1], "shell_run_id": argv[2]})
         print(json.dumps(res, indent=2))
@@ -1772,6 +2155,7 @@ if __name__ == "__main__":
     elif argv:
         sys.stderr.write("usage: heat_server.py [--tools a,b] | --stage-only <target> <grid> "
                          "[tol] [max_iter] | --evaluate <run_id> | --list [target] | --campaign [file] | "
+                         "--spack-inputs <target> | "
                          "--compare <mcp_run_id> <shell_run_id>\n")
         sys.exit(2)
     sys.exit(serve())

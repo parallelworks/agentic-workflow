@@ -61,8 +61,8 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   costs a level of `subagentDepth` (2), and an agent at the deepest level has no
   Task tool. The names
   `site-runner`, `site-runner-mcp`, `evaluator`, `evaluator-mcp`,
-  `compare-agents`, `campaign-orchestrator`, `orchestrator-mcp` and
-  `capacity-analyst` are agents,
+  `compare-agents`, `campaign-orchestrator`, `orchestrator-mcp`,
+  `site-prep-mcp` and `capacity-analyst` are agents,
   not procedures. Call Task with `background: false` unless you have other
   independent work to do meanwhile, so you wait for the agent's result and report
   it: in a one-shot `pw code -p` run, a background agent finishes after the
@@ -260,6 +260,21 @@ use the parent's MCP server); see `.agents/mcp/README.md`. Pre-approve its tools
 Task --allowedTools mcp__heat__load_campaign --allowedTools mcp__heat__list_runs
 --allowedTools mcp__heat__run_heat --allowedTools mcp__heat__poll_heat
 --allowedTools mcp__heat__evaluate_run`.
+SITE PREPARATION (not part of a campaign; run only when a human asks):
+`site-prep-mcp` has three tools from the same server (`--tools
+copy_buildcache,run_spack,spack_status`). `copy_buildcache(target, uri)` runs
+`workflows/buildcache.yaml`, which on the cluster copies a
+`pw://<user>/<bucket>/<name>.tar.gz` into `$HOME` with `pw buckets cp` and
+unpacks it with `tar -xzf` (so it needs the `pw` CLI on the cluster).
+`run_spack(target)` STARTS `workflows/spack.yaml`, which calls the spack-builder
+workflow (`github/parallelworks/workflows@canary`) as a subworkflow with the
+target's scheduler, partition, directives and `build_gpu` (gpu mode), and returns
+at once; `spack_status(run_id)` only reads that build's state. Ids are
+`site-prep-mcp-<target>-<NNNNNN>`, staged under `runs/` like every other run.
+Route requests to prepare a target, copy a build cache, or build or check the
+Spack stack to `site-prep-mcp`. Pre-approve `--allowedTools
+mcp__heat__copy_buildcache --allowedTools mcp__heat__run_spack --allowedTools
+mcp__heat__spack_status`.
 SESSION DIGESTS: `SubagentStop`/`SessionEnd` hooks in `.agents/settings.json`
 run `.agents/hooks/agent_digest.py`, which writes a redacted
 `runs/<id>/agent-digest.json` (tokens, model, turns, tool-call sequence; no

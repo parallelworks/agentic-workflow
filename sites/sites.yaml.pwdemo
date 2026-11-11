@@ -172,7 +172,7 @@ targets:
     mpi_ranks: 1
     mpi_launch: "mpiexec"
     env_load:
-      - eval `~/spack/bin/spack load --sh /oqnv7x5`
+      - eval `~/spack/bin/spack load --sh nvhpc`
     directives: |
       # Placeholder here; no scheduler
 

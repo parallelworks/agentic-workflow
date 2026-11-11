@@ -113,5 +113,11 @@ siblings. Test results are in `results/agent-summary.md`.
      or run_id, so failed and rejected runs got no digest). Still: a Task whose subagent
      report starts with "Error" counts as failed. Next: a per-session digest
      (item 2), which is the only way an orchestrator session gets a digest.
+     2026-11-10: tool results stored as a list of text parts (claude-code/opus)
+     are now parsed (before, Opus sessions got no digest and no failure
+     detection), and `run_spack`/`copy_buildcache` ids get site-prep-mcp
+     digests. Backfilled for laptop-cpu-000021, lab-cpu-000011,
+     evaluator-mcp-laptop-cpu-000014, -lab-cpu-000006 and
+     site-prep-mcp-gce-cpu-000001.
    - Hooks re-trust (waiting on a colleague).
    - A future agent that fills in `sites.yaml` by inspecting existing clusters.

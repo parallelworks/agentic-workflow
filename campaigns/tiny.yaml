@@ -26,6 +26,7 @@ axes:
   target:
     - laptop-cpu
     - lab-cpu
+    - lab-gpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:
