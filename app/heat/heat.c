@@ -183,7 +183,7 @@ int main(int argc, char **argv) {
 #endif
 
 #ifdef _OPENACC
-#pragma acc data copy(u[0:cells]) create(u_new[0:cells]) if(want_gpu)
+#pragma acc data copy(u[0:cells]) copyin(u_new[0:cells]) if(want_gpu)
 #endif
     for (iter = 0; iter < max_iter && !converged; iter++) {
         /* ---- SEAM 1: halo exchange ALWAYS through MPI ---- */
