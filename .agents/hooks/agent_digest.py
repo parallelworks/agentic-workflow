@@ -63,6 +63,9 @@ UNKNOWN_TOOL_ERROR = re.compile(r'^Error: unknown tool "[^"\n]{1,200}"$')
 TASK_ERROR = re.compile(r'^Error executing Task: [^\n]+$')
 ERROR_CHARS = 300
 MCP_ERROR_PREFIX = "MCP tool error: "
+# Session and agent ids pw code puts in hook payloads (e.g. 20261111-132318-cc93370d,
+# agent-task-9). Only values of this shape are copied into hooks.jsonl.
+HOOK_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
 def _args(raw):
@@ -236,14 +239,19 @@ def main():
         written = []
         if path and os.path.isfile(path):
             written = write(path, payload.get("agent_type"), payload.get("hook_event_name"))
-        # Breadcrumb: proves the hook fired. Key names only, never payload values.
+        # Breadcrumb: proves the hook fired. Key names, plus the session and agent
+        # ids when they have the expected shape; no other payload values. pw code
+        # fires SessionEnd only for interactive sessions, so a SessionEnd line with
+        # its session_id marks that session (and every digest from it) interactive.
+        ids = {k: payload[k] for k in ("session_id", "agent_id")
+               if isinstance(payload.get(k), str) and HOOK_ID.match(payload[k])}
         os.makedirs(os.path.join(RUNS, "_mcp"), exist_ok=True)
         with open(os.path.join(RUNS, "_mcp", "hooks.jsonl"), "a") as fh:
-            fh.write(json.dumps({
+            fh.write(json.dumps(dict({
                 "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "event": payload.get("hook_event_name"), "agent_type": payload.get("agent_type"),
-                "keys": sorted(payload), "transcript_found": bool(path and os.path.isfile(path)),
-                "written": written}) + "\n")
+                "event": payload.get("hook_event_name"), "agent_type": payload.get("agent_type")},
+                **ids, keys=sorted(payload), transcript_found=bool(path and os.path.isfile(path)),
+                written=written)) + "\n")
     except Exception as e:
         sys.stderr.write("agent_digest: %s\n" % e)
     return 0
