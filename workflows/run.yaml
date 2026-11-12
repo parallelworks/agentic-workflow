@@ -101,7 +101,7 @@ jobs:
           git checkout "$SHA"
           echo "STAGED url=$URL commit=$(git rev-parse HEAD) dest=$DEST"
           ls -1 app/heat/heat.c app/heat/Makefile app/heat/validate.py \
-                 app/heat/reference/heat_128.ref
+                 app/heat/reference/heat_128.ref.gz
 
       - name: Build — compile the requested mode
         run: |

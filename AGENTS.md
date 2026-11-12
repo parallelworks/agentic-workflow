@@ -73,8 +73,8 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   or restate the agent's procedure; the agent has its own instructions. Do not
   ask for extra output such as file contents: ask for the agent's report, which
   names its run id or verdict path. If the
-  user gave no grid, use 128 (the only grid with a reference field, and the
-  default in `workflows/run.inputs.json`) and say so in the prompt and your
+  user gave no grid, use 128 (the default in
+  `workflows/run.inputs.json`; reference fields exist for 128 to 1024) and say so in the prompt and your
   reply.
   REPORTING: report only results an agent has returned to you. While any Task
   is still outstanding, say which ones are, never "all finished". Before sending
