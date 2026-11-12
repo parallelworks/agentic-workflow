@@ -23,7 +23,9 @@ siblings. Test results are in `results/agent-summary.md`.
    - `capacity.yaml`'s `none` branch has only been run locally, not through a
      workflow.
    - Long jobs relying on `run_heat` returning at the `SUBMITTED` line are
-     untested.
+     untested. pw also cuts off a subagent that "stopped making progress for
+     15m0s" (Q20), which a campaign with a long job hits: run big grids with
+     `site-runner-mcp` directly and evaluate in a separate session.
    - Clusters with several login nodes behind one name are untested; poll
      reports UNKNOWN there by design.
 2. **Gaps in the cost logging:**
@@ -90,6 +92,19 @@ siblings. Test results are in `results/agent-summary.md`.
    18. Is the subagent tool restriction (Q8) guaranteed under
        `--permission-mode bypass-permissions`? We rely on it.
    19. Are `permissions.deny` rules honoured in bypass mode?
+
+   *Long-running subagents*
+   20. On 2026-11-12 (session 20261112-183218-2e4c6896, Opus) pw ended two
+       subagents with `[subagent cut off by an error before finishing its task:
+       subagent stopped making progress for 15m0s]`: a `site-runner-mcp` still
+       calling `poll_heat` as instructed (each call waits up to 7 minutes; its
+       last one was 30 s before the cutoff), and one second later the
+       `orchestrator-mcp` waiting on it in a foreground Task (its previous Task
+       had returned about 17 minutes earlier). Neither fired `SubagentStop`, and
+       the orchestrator never reached its evaluation step. What counts as
+       progress? Is the 15-minute limit configurable per agent or per session?
+       Should a parent waiting on a foreground Task whose child is still working
+       count as stalled? Hours-long jobs (grid 2048) need a supported way to wait.
 4. **Older backlog:**
    - `write_summary` should reject numbers that aren't in `comparison.json`.
    - The procedure is duplicated between `site-runner.md` and AGENTS.md, and

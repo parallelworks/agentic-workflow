@@ -169,7 +169,7 @@ hook command, not the script it runs.
 - **Campaign loading only reads:** `load_campaign` reads one file directly inside
   `campaigns/` (no other path is accepted) and target fields through the protected
   `_site_query.py`; it writes nothing and refuses a campaign of more than
-  `MAX_CAMPAIGN_RUNS` (16) runs.
+  `MAX_CAMPAIGN_RUNS` (21) runs.
 - **Evaluation never resubmits:** `evaluate_run` runs only poll, fetch and
   validate against the run agent's existing remote dir.
 
@@ -464,7 +464,7 @@ outside `campaigns/` is rejected) and returns:
   (which `run_heat` would reject), each with a reason.
 
 With no `campaign` it lists the campaign files. A campaign that expands to more
-than `MAX_CAMPAIGN_RUNS` (16) runs is rejected, so one call cannot fan out an
+than `MAX_CAMPAIGN_RUNS` (21) runs is rejected, so one call cannot fan out an
 unbounded number of cluster jobs. The file is parsed with PyYAML from system
 site-packages when available, else with a minimal parser for the documented
 campaign shape. Debug without MCP: `python3 -I .agents/mcp/heat_server.py

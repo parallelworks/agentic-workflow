@@ -103,7 +103,7 @@ RESULTS = os.path.join(REPO, "results")
 CAMPAIGNS = os.path.join(REPO, "campaigns")
 # load_campaign refuses a campaign that expands to more runs than this, so one
 # orchestrator call cannot fan out an unbounded number of cluster jobs.
-MAX_CAMPAIGN_RUNS = 16
+MAX_CAMPAIGN_RUNS = 21
 
 DEFAULT_TOL = "1e-3"
 DEFAULT_L2_TOLERANCE = "1e-6"  # validate.yaml's pass tolerance; NOT the solver's tol

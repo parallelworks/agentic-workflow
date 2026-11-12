@@ -23,14 +23,17 @@ axes:
     - 128
     - 256
     - 512
-    - 1024
-    - 2048
   # Target names must match entries in sites/sites.yaml. Listing both a cpu and
   # a gpu target for the same cluster runs both node types — nothing is
   # auto-selected. Comment out any target you don't want in the sweep.
   target:
+    - laptop-cpu
     - lab-cpu
     - lab-gpu
+    - gce-cpu
+    - aws-cpu
+    - oci-cpu
+    - azure-cpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:
