@@ -41,7 +41,10 @@ jobs:
           [ -n "$TOL" ] || TOL=1e-6
 
           FIELD="$(ls -1 app/heat/out/field_*.txt 2>/dev/null | tail -1 || true)"
-          REF="app/heat/reference/heat_${GRID}.ref"
+          # References are stored gzip-compressed (validate.py reads .gz directly);
+          # fall back to a plain .ref for commits from before the compression.
+          REF="app/heat/reference/heat_${GRID}.ref.gz"
+          [ -f "$REF" ] || REF="app/heat/reference/heat_${GRID}.ref"
 
           if [ -z "$FIELD" ]; then
             echo '{"ok":false,"error":"no field dump found on cluster"}'; exit 1

@@ -52,76 +52,127 @@
 
 targets:
 
-  # ---- A Slurm cluster, CPU nodes, 2-node run using only 16 ranks/node ----
-  - name: bigcluster-cpu
-    ssh_name: pw://myuser/bigcluster
+  # ---- Cloud cluster, CPU nodes ----
+
+  - name: gce-cpu
+    ssh_name: pw://pwdemo.stefan/gce
     scheduler: slurm
     mode: cpu
-    mpi_ranks: 32
-    mpi_launch: "srun --mpi=pmix"
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
     env_load:
-      - module load gcc/12
-      - module load openmpi/4.1
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-cascadelake:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
     directives: |
       #SBATCH --job-name=heat_cpu
-      #SBATCH --partition=normal
-      #SBATCH --qos=normal
-      #SBATCH --account=MYPROJECT
+      #SBATCH --partition=cpu
       #SBATCH --nodes=2
-      #SBATCH --ntasks-per-node=16
+      #SBATCH --ntasks-per-node=2
       #SBATCH --time=00:30:00
 
-  # ---- The SAME cluster, GPU nodes: different partition, QoS, account ----
-  - name: bigcluster-gpu
-    ssh_name: pw://myuser/bigcluster
+  - name: aws-cpu
+    ssh_name: pw://pwdemo.stefan/aws
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-skylake_avx512:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  - name: oci-cpu
+    ssh_name: pw://pwdemo.stefan/oci
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-zen:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  - name: azure-cpu
+    ssh_name: pw://pwdemo.stefan/azure
+    scheduler: slurm
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
+    env_load:
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64_v3:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
+    directives: |
+      #SBATCH --job-name=heat_cpu
+      #SBATCH --partition=cpu
+      #SBATCH --nodes=2
+      #SBATCH --ntasks-per-node=2
+      #SBATCH --time=00:30:00
+
+  # ---- Cloud cluster, GPU nodes ----
+
+  - name: gce-gpu
+    ssh_name: pw://pwdemo.stefan/gce
     scheduler: slurm
     mode: gpu
-    mpi_ranks: 4
-    gpus_per_node: 4
-    mpi_launch: "srun --mpi=pmix"
+    mpi_ranks: 1
+    mpi_launch: "mpiexec"
     env_load:
-      - module load nvhpc/24.3
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-cascadelake:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - module load gcc
+      - module load openmpi
     directives: |
       #SBATCH --job-name=heat_gpu
       #SBATCH --partition=gpu
-      #SBATCH --qos=gpu-normal
-      #SBATCH --account=MYPROJECT-GPU
       #SBATCH --nodes=1
-      #SBATCH --ntasks-per-node=4
-      #SBATCH --gpus-per-node=4
-      #SBATCH --time=00:20:00
+      #SBATCH --ntasks-per-node=1
+      #SBATCH --time=00:30:00
 
-  # ---- A PBS cluster, CPU nodes ----
-  - name: pbscluster-cpu
-    ssh_name: pw://myuser/pbscluster
-    scheduler: pbs
+  # ---- Single host (no scheduler) ----
+
+  - name: laptop-cpu
+    ssh_name: pw://pwdemo.stefan/laptop
+    scheduler: none
     mode: cpu
-    mpi_ranks: 24
-    mpi_launch: "mpirun"
+    mpi_ranks: 4
+    mpi_launch: "mpiexec.openmpi"
     env_load:
-      - module load gcc/12
-      - module load openmpi/4.1
+      - export HELLO_FROM_SITES_YAML=hello
     directives: |
-      #PBS -N heat_cpu
-      #PBS -q workq
-      #PBS -A MYPROJECT
-      #PBS -l select=1:ncpus=24:mpiprocs=24
-      #PBS -l walltime=00:30:00
+      # Placeholder here; no scheduler
 
-  # ---- A PBS cluster, GPU nodes ----
-  - name: pbscluster-gpu
-    ssh_name: pw://myuser/pbscluster
-    scheduler: pbs
-    mode: gpu
-    mpi_ranks: 2
-    gpus_per_node: 2
-    mpi_launch: "mpirun"
+  - name: lab-cpu
+    ssh_name: pw://pwdemo.stefan/labgpu
+    scheduler: none
+    mode: cpu
+    mpi_ranks: 4
+    mpi_launch: "mpiexec"
     env_load:
-      - source /opt/spack/share/spack/setup-env.sh
-      - spack load nvhpc@24.3
+      - eval `~/spack/bin/spack load --sh openmpi@5.0.10~cuda`
     directives: |
-      #PBS -N heat_gpu
-      #PBS -q gpuq
-      #PBS -A MYPROJECT-GPU
-      #PBS -l select=1:ncpus=8:mpiprocs=2:ngpus=2
-      #PBS -l walltime=00:20:00
+      # Placeholder here; no scheduler
+
+  - name: lab-gpu
+    ssh_name: pw://pwdemo.stefan/labgpu
+    scheduler: none
+    mode: gpu
+    mpi_ranks: 1
+    mpi_launch: "mpiexec"
+    env_load:
+      - eval `~/spack/bin/spack load --sh nvhpc`
+    directives: |
+      # Placeholder here; no scheduler
+

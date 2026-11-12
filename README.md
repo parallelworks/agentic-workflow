@@ -3,7 +3,9 @@
 A hands-on workshop showing how a fleet of custom agents in
 [`pw code`](https://parallelworks.com/docs/ai/code/custom-agents) work together
 to drive simulation and modeling across a fleet of HPC clusters — where a
-"site" is a Slurm or PBS cluster reached over `pw ssh`.
+"site" is a Slurm or PBS cluster reached over `pw ssh`. A target with
+`scheduler: none` skips the batch system and runs the job directly on the
+cluster's login/head node (see AGENTS.md, "Targets, not clusters").
 
 Agents work in terms of **targets** — a target is one specific way to run on a
 cluster (its scheduler directives, CPU/GPU mode, and rank count). One cluster can
@@ -28,14 +30,17 @@ to make portability and capacity questions concrete.
 In `pw code`, a *custom agent* is a markdown file (`.agents/agents/*.md`) with
 YAML frontmatter and a specialization prompt. There is no orchestrator program —
 coordination happens *inside* `pw code`: the main agent reads each definition's
-`description` and delegates work to the right subagent. This repo ships four:
+`description` and delegates work to the right subagent. This repo ships seven:
 
 | Agent | Role |
 |-------|------|
-| `campaign-orchestrator` | The orchestrator: expands a sweep, dispatches runs to site-runner, hands completed runs to the evaluator. |
-| `site-runner` | Runs the workload on ONE target — stages, builds, submits (one workflow), then polls to done. The cross-site primitive. |
-| `evaluator` | After runs finish, fetches + validates on every cluster and analyzes portability (reproducing the solution) and performance (run time) together. |
+| `campaign-orchestrator` | The orchestrator: expands a sweep, dispatches runs to site-runner-mcp (default run agent), hands completed runs to the evaluator. |
+| `site-runner-mcp` | DEFAULT run agent. Same job as site-runner, but uses two typed MCP tools (`run_heat`, `poll_heat` in `.agents/mcp/heat_server.py`) instead of shell-built commands. |
+| `site-runner` | Runs the workload on ONE target — stages, builds, submits (one workflow), then polls to done. Kept as the shell-built baseline; used only when named. |
+| `evaluator-mcp` | DEFAULT evaluator. After runs finish, evaluates each with one typed MCP tool (`evaluate_run`: fetch, validate, audit against the target, save verdict.json), then analyzes portability and performance together. |
+| `evaluator` | Same job built in shell: fetches + validates on every cluster and analyzes portability (reproducing the solution) and performance (run time). Kept as the baseline; used only when named. |
 | `capacity-analyst` | Read-only; recommends which target a job should run as. |
+| `compare-agents` | Post-hoc: compares each MCP agent with its shell sibling (site-runner-mcp vs site-runner, evaluator-mcp vs evaluator) for the same job (parity, actions, results, cost) across model switches. MCP tools (`list_runs`, `compare_runs`) do the pairing and write the report tables; the model adds a summary (`write_summary`). |
 
 ## How agents reach clusters
 
@@ -67,18 +72,35 @@ kept for comparison but are no longer used.
 ```
 AGENTS.md                    project instructions pw code reads every session
 .agents/
-  agents/*.md                the four custom agent definitions
+  agents/*.md                the seven custom agent definitions
+  mcp/heat_server.py         stdlib-only MCP server: run_heat + poll_heat, evaluate_run,
+                             list_runs + compare_runs + write_summary (see .agents/mcp/README.md)
+  mcp/_site_query.py         protected copy the server runs; must match scripts/_site_query.py
+  hooks/agent_digest.py      hook: redacted per-run session digest for compare-agents
 app/heat/
   heat.c                     the MPI heat solver (equal 1-D slabs, halos over MPI)
   Makefile                   cpu + gpu (OpenACC) build targets
   validate.py                compares a run's field to the reference (L2 norm)
-  reference/heat_128.ref     golden reference field for grid 128
+  reference/heat_<N>.ref.gz  golden reference fields (gzip) for grids 128-2048
+sandbox/
+  docker-compose.yaml        Configuration for launching a JupyterLab + Ollama + Docker volume
+                             group of containers for a sandbox environment from which to run
+                             the agentic workflow with a local LLM.
+  README.md	             Instructions for using this sandbox environment
 sites/
-  sites.yaml                 THE fleet registry (list of targets) — edit first
+  sites.yaml.template        example fleet registry — copy to sites.yaml
+  sites.yaml                 THE fleet registry (list of targets) — your copy,
+                             git-ignored so private cluster details stay local
   slurm/ , pbs/              LEGACY submit templates + env.sh per scheduler
 scripts/
   submit.sh poll.sh fetch.sh capacity.sh   LEGACY pw ssh wrappers (kept for
                              comparison; agents no longer use these)
+  _site_query.py             reads one field of one target from sites.yaml
+  session_tools/             for HUMANS, not agents: read pw code session
+                             transcripts to check what agents actually did —
+                             delegation (Task calls, subagent_type), each
+                             subagent's commands and polls, denied/garbled
+                             calls, tokens (see session_tools/README.md)
 workflows/
   run/poll/fetch/validate/capacity .yaml + .inputs.json
                              platform-logged workflow templates (the layer
@@ -109,7 +131,10 @@ WORKSHOP.md                  facilitator guide: three exercises, timed
 
 ## Quick start
 
-1. **Edit `sites/sites.yaml`** to describe your actual **targets**. A target is
+1. **Create and edit `sites/sites.yaml`** to describe your actual **targets**.
+   It is git-ignored (it holds your user name, cluster names and paths), so start
+   from the committed example: `cp sites/sites.yaml.template sites/sites.yaml`.
+   Everything reads `sites/sites.yaml`; the template is never used. A target is
    one way to run on a cluster: its `ssh_name` is the cluster's PW URI
    (`pw://<user>/<cluster>`), and its `directives` block holds the literal
    #SBATCH/#PBS lines that cluster needs (partition, QoS, account, walltime,

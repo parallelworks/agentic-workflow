@@ -7,7 +7,9 @@ produce the SAME converged temperature field. We measure that as the relative
 L2 norm of the difference between a run's field and the reference field.
 
 Usage:
-    validate.py --field <run_dump> --reference <golden.ref> [--tol 1e-6]
+    validate.py --field <run_dump> --reference <golden.ref[.gz]> [--tol 1e-6]
+
+Either file may be gzip-compressed; a path ending in .gz is read with gzip.
 
 Exit code 0 = within tolerance (portable), 1 = diverged, 2 = usage/shape error.
 Prints a one-line JSON record so the agents can parse the verdict.
@@ -20,16 +22,19 @@ halo exchange, uninitialized boundary), which is the failure the exercise hunts.
 """
 
 import argparse
+import gzip
 import json
 import math
 import sys
 
 
 def load_field(path):
-    """Read a whitespace-separated grid, skipping comment lines starting with #."""
+    """Read a whitespace-separated grid, skipping comment lines starting with #.
+    A path ending in .gz is decompressed on the fly."""
     vals = []
     grid = None
-    with open(path) as fh:
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -60,6 +65,10 @@ def main():
         ref, gr = load_field(args.reference)
     except FileNotFoundError as exc:
         print(json.dumps({"ok": False, "error": f"missing file: {exc.filename}"}))
+        return 2
+    except (OSError, EOFError, ValueError) as exc:
+        # A truncated or corrupt .gz, or a non-numeric token in either file.
+        print(json.dumps({"ok": False, "error": f"unreadable field: {exc}"}))
         return 2
 
     if len(field) != len(ref):

@@ -1,0 +1,9 @@
+{
+  "cluster": "pw://<user>/<cluster>",
+  "scheduler_type": "<slurm|pbs|none>",
+  "scheduler": true,
+  "partition": "<from the target's #SBATCH --partition; empty otherwise>",
+  "time": "00:20:00",
+  "directives": "<the target's other directive lines, verbatim>",
+  "build_gpu": false
+}

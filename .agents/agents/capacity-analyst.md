@@ -25,7 +25,10 @@ For a request:
    `capacity-analyst-<target>-<NNNNNN>` with `capacity.yaml` + inputs, fill in
    the cluster URI, scheduler, and (optionally) partition, and run:
    `pw workflows run -i runs/<id>/capacity.inputs.json --name <id> runs/<id>/capacity.yaml`.
-   This returns queued/running counts and free node counts.
+   This returns queued/running counts and free node counts. For a
+   `scheduler: none` target (no queue; the job runs on the login node) it
+   returns that node's `host`, `cores`, `load1` and `gpus` instead; judge fit
+   from those (e.g. mpi_ranks vs cores, gpu mode vs gpus).
 3. Match mode to the request (never steer a CPU job to a GPU target just because
    GPUs exist), then among matching targets prefer the least-loaded cluster.
 

@@ -9,6 +9,7 @@ runs/*
 
 results/*
 !results/.gitkeep
+!results/agent-summary.md
 
 # Rendered job scripts land under results/ too
 *.sbatch
@@ -16,6 +17,9 @@ results/*
 
 # Scratch directive files rendered under results/
 *.directives
+
+# The sites.yaml with potentially private information
+sites/sites.yaml
 
 # Python
 __pycache__/

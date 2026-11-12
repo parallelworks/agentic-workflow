@@ -1,4 +1,4 @@
-# poll.yaml — report a job's state uniformly (slurm|pbs) from the cluster.
+# poll.yaml — report a job's state uniformly (slurm|pbs|none) from the cluster.
 #
 # The agent runs this repeatedly until state is DONE.
 # Each poll is a logged workflow run. (For frequent polling you may prefer fewer,
@@ -14,11 +14,11 @@
         type: compute-clusters
         optional: false
       scheduler:
-        label: Scheduler (slurm|pbs)
+        label: Scheduler (slurm|pbs|none)
         type: string
         optional: false
       job_id:
-        label: Scheduler job id to poll
+        label: Scheduler job id to poll (<host>:<pid> for none)
         type: string
         optional: false
 
@@ -51,6 +51,19 @@ jobs:
               C)   emit "DONE" "$RAW";;
               *)   emit "UNKNOWN" "$RAW";;
             esac
+          elif [ "$SCHED" = "none" ]; then
+            # No scheduler: run.yaml runs the job in the foreground on the node
+            # its SSH session reached, and its job_id is <host>:<pid> of that
+            # run's `timeout` process. The job is RUNNING while that process is.
+            HOST="${JOBID%:*}"; PID="${JOBID##*:}"
+            if [ "$HOST" != "$(hostname)" ]; then
+              emit "UNKNOWN" "poll reached $(hostname), job runs on $HOST"; exit 0
+            fi
+            if ps -p "$PID" -o args= 2>/dev/null | grep '^timeout ' >/dev/null; then
+              emit "RUNNING" "pid $PID"
+            else
+              emit "DONE" ""
+            fi
           else
             echo "poll: unknown scheduler '$SCHED'" >&2; exit 2
           fi

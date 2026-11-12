@@ -1,0 +1,4 @@
+{
+  "cluster": "pw://<user>/<cluster>",
+  "uri": "pw://<user>/<bucket>/<buildcache-name>.tar.gz"
+}

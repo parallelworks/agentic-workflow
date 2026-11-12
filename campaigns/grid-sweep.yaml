@@ -15,19 +15,25 @@ description: A first campaign — small grids across several targets, CPU and GP
 # Global solver settings applied to every run.
 solver:
   tol: 1e-3
-  max_iter: 50000
+  max_iter: 3500000
 
 # Sweep axes: the cross product of these is the run list.
 axes:
-  grid: [128]
+  grid:
+    - 128
+    - 256
+    - 512
   # Target names must match entries in sites/sites.yaml. Listing both a cpu and
   # a gpu target for the same cluster runs both node types — nothing is
   # auto-selected. Comment out any target you don't want in the sweep.
   target:
-    - pbs-cpu
-    - pbs-gpu
-    - slurm-cpu
-    - slurm-gpu
+    - laptop-cpu
+    - lab-cpu
+    - lab-gpu
+    - gce-cpu
+    - aws-cpu
+    - oci-cpu
+    - azure-cpu
 
 # ---------------------------------------------------------------------------
 # Try, in the workshop:

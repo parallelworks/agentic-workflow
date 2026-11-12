@@ -15,7 +15,7 @@
         type: compute-clusters
         optional: false
       scheduler:
-        label: Scheduler (slurm|pbs)
+        label: Scheduler (slurm|pbs|none)
         type: string
         optional: false
       partition:
@@ -52,6 +52,17 @@ jobs:
             if NODES="$(pbsnodes -a 2>/dev/null)"; then
               FREE=$(printf '%s\n' "$NODES" | grep -c 'state = free' || true)
             else RAW_OK=false; fi
+          elif [ "$SCHED" = "none" ]; then
+            # No queue: the job would run on the node this SSH session reached
+            # (the login/head node), so report that node itself.
+            FREE=1
+            HOST="$(hostname)"
+            CORES="$(nproc 2>/dev/null || echo 0)"
+            LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
+            GPUS="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU' || true)"
+            printf '{"scheduler":"%s","partition":"%s","queued":%s,"running":%s,"free_nodes":%s,"raw_ok":%s,"host":"%s","cores":%s,"load1":%s,"gpus":%s}\n' \
+              "$SCHED" "$PART" "$QUEUED" "$RUNNING" "$FREE" "$RAW_OK" "$HOST" "$CORES" "$LOAD1" "${GPUS:-0}"
+            exit 0
           else
             echo "capacity: unknown scheduler '$SCHED'" >&2; exit 2
           fi

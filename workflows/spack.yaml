@@ -1,0 +1,78 @@
+# spack.yaml — build the Spack stack on a target's cluster by calling the
+# spack-builder workflow (parallelworks/workflows, branch canary) as a
+# subworkflow. Nothing of spack-builder is copied into this repository.
+#
+#   pw workflows run -i runs/<id>/spack.inputs.json --name <id> runs/<id>/spack.yaml
+#
+# The MCP tool run_spack fills the inputs from the target in sites/sites.yaml:
+#   scheduler       false for `scheduler: none` (inspect and build on the login node)
+#   partition/time  the target's #SBATCH --partition and --time (slurm only)
+#   directives      the target's remaining directive lines, verbatim
+#   build_gpu       true when the target's mode is gpu
+# Every other spack-builder input keeps its own default (Spack root ~/spack,
+# build cache ~/spack-buildcache, modules ~/pw/software/modules, build on the
+# login node, no dry run, no public binaries).
+#
+# Pinned to @canary. spack-builder also checks out its own app/ scripts from
+# branch canary, so the build scripts follow canary whatever this ref says.
+#
+# A cold build takes hours; with a matching build cache in ~/spack-buildcache
+# (see buildcache.yaml) it takes minutes. On success spack-builder leaves a
+# placeholder endpoint named spack-builder-<run slug> running; delete it with
+# `pw endpoints delete <name>` when it is no longer wanted.
+
+permissions: ['*']
+
+'on':
+  execute:
+    inputs:
+      cluster:
+        label: Target cluster
+        type: compute-clusters
+        optional: false
+      scheduler_type:
+        label: The target's scheduler (slurm|pbs|none)
+        type: string
+        optional: false
+      scheduler:
+        label: Inspect a compute node through the scheduler (false for scheduler none)
+        type: boolean
+        default: true
+      partition:
+        label: SLURM partition (from the target's directives)
+        type: string
+        optional: true
+      time:
+        label: SLURM walltime of the inspection job (from the target's directives)
+        type: string
+        default: '00:20:00'
+      directives:
+        label: The target's remaining scheduler directives, verbatim
+        type: string
+        optional: true
+      build_gpu:
+        label: Build the GPU path (true for a gpu-mode target)
+        type: boolean
+        default: false
+
+jobs:
+  spack:
+    steps:
+      - name: Build the Spack stack (spack-builder)
+        uses: github/parallelworks/workflows@canary
+        early-cancel: any-job-failed
+        with:
+          $yaml: workflows/spack-builder/yamls/general.yaml
+          cluster:
+            resource: ${{ inputs.cluster }}
+            scheduler: ${{ inputs.scheduler }}
+            slurm:
+              is_enabled: ${{ inputs.scheduler_type == 'slurm' }}
+              partition: ${{ inputs.partition }}
+              time: ${{ inputs.time }}
+              scheduler_directives: ${{ inputs.directives }}
+            pbs:
+              is_enabled: ${{ inputs.scheduler_type == 'pbs' }}
+              scheduler_directives: ${{ inputs.directives }}
+          service:
+            build_gpu: ${{ inputs.build_gpu }}
