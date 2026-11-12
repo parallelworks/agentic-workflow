@@ -66,6 +66,7 @@ MCP_ERROR_PREFIX = "MCP tool error: "
 # Session and agent ids pw code puts in hook payloads (e.g. 20261111-132318-cc93370d,
 # agent-task-9). Only values of this shape are copied into hooks.jsonl.
 HOOK_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+HOOK_REASON = re.compile(r"^[a-z_-]{1,40}$")
 
 
 def _args(raw):
@@ -245,6 +246,10 @@ def main():
         # its session_id marks that session (and every digest from it) interactive.
         ids = {k: payload[k] for k in ("session_id", "agent_id")
                if isinstance(payload.get(k), str) and HOOK_ID.match(payload[k])}
+        # SessionEnd's reason (how the session ended, e.g. clear or exit), kept
+        # only when it is a short lowercase word.
+        if isinstance(payload.get("reason"), str) and HOOK_REASON.match(payload["reason"]):
+            ids["reason"] = payload["reason"]
         os.makedirs(os.path.join(RUNS, "_mcp"), exist_ok=True)
         with open(os.path.join(RUNS, "_mcp", "hooks.jsonl"), "a") as fh:
             fh.write(json.dumps(dict({
