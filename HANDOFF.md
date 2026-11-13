@@ -181,13 +181,71 @@ siblings. Test results are in `results/agent-summary.md`.
      (next 20 tiles, `RAY_JOB_STATE=SUCCEEDED`, run completed, canvas 40/100).
      (`render_status` reads the JSON result
      line, so an agent would still have reported the render correctly.)
+     SLURM PATH CONFIRMED 2026-11-13: cluster capital-quetzal (Slurm workers only,
+     gce/aws/oci, 2 nodes x `--cpus-per-task=2`, 02:00:00), canvas slurm-test-000001,
+     add run close-feline (commit d38763c): 20/20 tiles, 0 failed, 4.0 s, Ray Job
+     SUCCEEDED; 16 tiles on gce (127.0.2.1), 4 on oci (127.0.4.1); a second oci
+     node (127.0.4.2) joined mid-run and the driver picked it up. aws's nodes were
+     still CONFIGURING (cloud provisioning) when the launch run completed, so no aws
+     worker took part.
      Fallback: run `render.py add` directly in the workflow step, still on the
      head host;
    - inside a Slurm worker, `os.sched_getaffinity` sees the `--cpus-per-task`
      cores (ray-cluster's `srun --ntasks=N` step is not `--exact`), so the per-node
-     pool is the target's cores per node;
+     pool is the target's cores per node. MIXED 2026-11-13 (close-feline): the gce
+     node saw 2 cores, but both oci nodes saw 1, from the same `--cpus-per-task=2`
+     row. NOT the node definition: `scontrol show node` on oci gives CPUTot=2,
+     ThreadsPerCore=1, CoresPerSocket=2, Slurm 23.11.9, and the worker job holds
+     AllocTRES cpu=2 (hyperthreading is off; the sibling threads are offline).
+     The step is not the cause either: `scontrol show step 3.0` on oci gives
+     Tasks=2, CPUs=4, TresPerTask=cpu:2 (23.11 passes `--cpus-per-task` on to srun).
+     Leading hypothesis now: the binding Slurm applies maps the task's 2 CPUs onto
+     logical CPU ids that include the OFFLINE hyperthread siblings, so the online
+     part of the mask is 1 CPU. Check inside the running step on an oci node:
+     `grep Cpus_allowed_list /proc/<raylet pid>/status`,
+     `cat /sys/devices/system/cpu/online` and `lscpu -e`. oci's config (Slurm
+     23.11.9): `TaskPlugin=task/cgroup,task/affinity`, `TaskPluginParam` unset,
+     `SelectTypeParameters=CR_CPU`, cgroup `ConstrainCores=no`. So the binding is
+     task/affinity's `sched_setaffinity` (no cpuset), which is exactly what
+     `os.sched_getaffinity` reports. gce's config is the same in every relevant
+     setting (23.11.9, same TaskPlugin, CR_CPU, ConstrainCores=no), so the
+     difference is the oci hardware (siblings offline), which supports the
+     offline-sibling hypothesis. On an oci compute node
+     `/sys/devices/system/cpu/online` is `0,2` (CPUs 1 and 3, the siblings, are
+     offline). If task/affinity maps the task's 2 CPUs to machine CPUs 0 and 1,
+     the mask holds one online CPU. CONFIRMED in effect: the raylet's
+     `Cpus_allowed_list` on that node is `0` (CPU 2 unused). The kernel drops
+     offline CPUs from an affinity mask, so `0` is what a {0,1} binding leaves;
+     `scontrol -d show job <id> | grep CPU_IDs` (expect `CPU_IDs=0-1`) shows
+     Slurm's side if it matters. Full write-up for the provisioning team:
+     "OCI: Slurm CPU binding with hyperthreading disabled" below. DECISION
+     (2026-11-13): nothing is implemented here for it; the team may change the
+     oci configuration in general;
    - `stop_ray` leaves no `ray-worker-*` job behind (check with the capacity
-     workflow).
+     workflow). 2026-11-13: `pw endpoints delete ray-cluster-capital-quetzal` (what
+     `stop_ray` runs) removed the endpoint within ~5 s; the user checks the gce,
+     aws and oci queues.
+   - DONE 2026-11-13 on capital-quetzal, canvas slurm-test-000001:
+     - perfect-ibex (`add`, `all: true`): the remaining 80 tiles, 0 failed, Ray Job
+       SUCCEEDED, canvas complete with checksum `0ad866f6...aabfa8fd`, IDENTICAL to a
+       local single-process render of the same spec. Tiles came from two runs and
+       two sites (gce 16, oci 84).
+     - The gce node (127.0.2.1) was dropped at the start of that render with
+       `RuntimeEnvSetupError: Failed to set up runtime environment` (it had
+       rendered close-feline's tiles an hour earlier); the driver carried on with
+       the oci nodes as designed. Cause not yet known: the Ray Job's working_dir
+       package is set up on every node that runs the job's actors, and that setup
+       failed on gce. The node's Ray runtime-env logs
+       (`/tmp/ray/session_latest/logs/` on the gce node) would say why; `render.py`
+       prints only the first line of the error.
+     - secure-dinosaur (`status`) and active-pegasus (`redraw`, 100 tiles posted)
+       completed, so `render_status` on a canvas id and the redraw path work.
+
+   - 2026-11-13: `launch_ray` takes an optional `targets` list (cpu targets by name)
+     so a launch can leave out targets that are busy or short of quota (e.g. azure-cpu
+     during a long heat run): "Use the ray-launcher-mcp agent to start a Ray cluster
+     that spans compute targets gce-cpu, aws-cpu, and lab-cpu". Tested offline (fake
+     pw and over MCP); not yet run by the agent.
 
    Open:
    - The worker rows follow the heat targets' footprint. The pwdemo targets give
@@ -204,6 +262,87 @@ siblings. Test results are in `results/agent-summary.md`.
      (canvas checksum vs a local reference); non-square canvases (the dashboard
      draws a square `grid_size`).
 
+
+## OCI: Slurm CPU binding with hyperthreading disabled
+
+Status (2026-11-13): diagnosed, nothing changed. To be discussed with the cluster
+provisioning team, who may change the oci configuration in general. No workaround
+is implemented in this repo, on purpose.
+
+### Summary
+
+On the pwdemo oci cluster, a Slurm task granted 2 CPUs on a 2-core node can run on
+only ONE core. The node's online CPUs are numbered 0 and 2 (hyperthreading is off
+because the sibling threads 1 and 3 are offline), but Slurm's CPU binding uses CPUs
+0 and 1. CPU 1 is offline, so the task ends up on CPU 0 alone and CPU 2 sits idle.
+Anything Slurm binds on these nodes gets half the node.
+
+### Evidence
+
+- Symptom: Ray fractal render close-feline (cluster capital-quetzal, worker rows
+  with `--cpus-per-task=2` on 2-node gce, aws and oci clusters). `render.py` sizes
+  its per-node process pool with `os.sched_getaffinity(0)`; it saw **2** CPUs on the
+  gce node and **1** on each oci node, from identical rows.
+- oci node (`scontrol show node pwdemostefan-oci-00018-1-0001`): shape
+  VM.Standard.E2.2, `CPUTot=2`, `CPUEfctv=2`, `CoresPerSocket=2`, `ThreadsPerCore=1`,
+  Slurm 23.11.9, job holds `AllocTRES=cpu=2`. The node definition is right.
+- Worker step (`scontrol show step 3.0`): `Tasks=2`, `CPUs=4`, `TresPerTask=cpu:2`.
+  The step does get 2 CPUs per task (23.11 passes `--cpus-per-task` on to `srun`).
+- Slurm config (`scontrol show config`), identical on oci and gce in every relevant
+  setting: `TaskPlugin=task/cgroup,task/affinity`, `TaskPluginParam` unset,
+  `SelectType=select/cons_tres`, `SelectTypeParameters=CR_CPU`, cgroup
+  `ConstrainCores=no`. So CPU placement is done only by task/affinity's
+  `sched_setaffinity`; there is no cpuset fence.
+- oci compute node: `/sys/devices/system/cpu/online` = `0,2`.
+- Ray worker (raylet) on that node: `Cpus_allowed_list: 0`.
+- Not yet run (would show Slurm's own CPU ids): `scontrol -d show job <id> | grep
+  CPU_IDs`, expected `CPU_IDs=0-1`. The kernel drops offline CPUs from an affinity
+  mask, so a {0,1} binding leaves exactly `0`.
+
+Since the Slurm configuration is the same on both clusters, the difference is the
+hardware layout: gce's online CPUs are 0 and 1, oci's are 0 and 2.
+
+### Impact
+
+- Ray workers on oci use 1 of 2 cores (fractal throughput on oci is about half).
+- Heat MPI runs on oci-cpu are bound the same way. If the target places 2 ranks per
+  node, both may share CPU 0. Results still validate (the solution does not depend
+  on placement), but oci timings in site comparisons are pessimistic.
+- Likely affects any job on these nodes that relies on Slurm's default binding.
+
+### Options
+
+1. **Site fix (preferred if the team agrees).** Make Slurm's CPU numbering match the
+   online cores: turn hyperthreading off at the shape/hypervisor level, or
+   renumber/online CPUs so the usable cores are 0 and 1, or describe the
+   topology so slurmd/hwloc binds to online CPUs only. Fixes Ray, heat and every
+   other job at once.
+2. **`srun --cpu-bind=none` for the Ray worker step** (a change to the upstream
+   ray-cluster workflow, `parallelworks/workflows`).
+   - Covers: any site where the problem is task/affinity binding to the wrong CPUs
+     (offline siblings, odd numbering, firmware quirks), as long as cores are not
+     cgroup-constrained. It fits Ray's model (one worker per node, parallelism inside
+     the node), where per-task binding adds nothing.
+   - Does NOT cover: sites with `ConstrainCores=yes`, where Slurm also builds a
+     cgroup cpuset from the same CPU ids, so the wrong-CPU problem remains and
+     `--cpu-bind=none` cannot widen it; and heat MPI runs, which are separate
+     steps.
+   - Risk: on shared nodes (`CR_CPU` lets several jobs share a node) with
+     `ConstrainCores=no`, an unbound worker sees every CPU on the node, including
+     other jobs' CPUs. An app that sizes its pool from its affinity (as `render.py`
+     does) would then oversubscribe the node. It is safe for our worker rows only
+     because they take whole nodes (2 of 2 CPUs).
+   - To make it general: pair it with app-side sizing from Slurm's allocation
+     (`SLURM_CPUS_PER_TASK` or `SLURM_CPUS_ON_NODE`, capped by the CPUs actually
+     usable, falling back to `sched_getaffinity` outside Slurm), and log a warning
+     when the usable CPUs are fewer than `SLURM_CPUS_PER_TASK`, so a bad binding shows
+     in the launch log rather than only as low throughput.
+3. **App widens its own affinity** to all online CPUs. Possible on oci because
+   cores are not cgroup-constrained, but it overrides the scheduler's decision; only
+   acceptable on nodes the job owns. Not recommended.
+
+Related: "Workflow Writing/Design Feedback", item 7 (pass `--cpus-per-task` to the
+worker `srun` and print each worker's usable CPU count when it joins).
 
 ## Workflow Writing/Design Feedback
 
@@ -272,3 +411,46 @@ suggest upstream.
    cluster) depend on that default, so we pass `ray_settings.name: ray-cluster`
    explicitly. Suggestion: document hidden inputs that shape externally visible
    names, or print the endpoint name as a step output early in the run.
+
+6. **Remote worker sites share one fixed work directory across clusters.** On every
+   remote site the worker side uses `~/pw/jobs/ray_worker_remote/` (the
+   `PW_PARENT_JOB_DIR` default in `teardown.sh`), whatever cluster it belongs to.
+   - What happened: cluster capital-quetzal's dispatcher output (in its `cluster_ready`
+     log) replayed lines from EARLIER clusters' workers: `JOB 1 ... CANCELLED ... DUE
+     TO TIME LIMIT` on aws from 15:29, `JOB 2` on gce and oci from 16:20/16:42, and
+     tunnel IPs `127.0.5.x` for oci (whose rows are `127.0.4.x` in this cluster). Its
+     `slurm_jobid` file is overwritten by each new cluster's worker job.
+   - Why it matters: the log mixes old failures into a healthy run, which misleads
+     anyone debugging, and the per-site cleanup reads only the newest `slurm_jobid`
+     and also runs `scancel --name="ray-worker-*"`, which cancels the worker jobs of
+     EVERY Ray cluster the user has on that site, not just this one.
+   - Suggestion: give each cluster its own remote dir (e.g.
+     `~/pw/jobs/ray_worker_remote/<endpoint-name>/`), truncate or rotate the worker
+     log when a new dispatch starts, and cancel by the recorded job id (or a job name
+     that includes the endpoint name) instead of a name wildcard.
+
+7. **`--cpus-per-task` on the batch job may not reach the `srun` step.** The worker
+   job runs `srun --ntasks=N` without `--cpus-per-task`, so whether the step (and
+   thus Ray's worker and its processes) sees the job's per-task CPUs depends on the
+   site's Slurm version and node definition. In close-feline the gce worker saw 2
+   cores and the oci workers saw 1 from identical rows, although oci's node and the
+   job both have 2 CPUs (see item 5). Suggestion: pass `--cpus-per-task` (or
+   `-c "$SLURM_CPUS_PER_TASK"`) to the `srun` explicitly, and print each worker's
+   visible CPU count (`os.sched_getaffinity`) when it joins, so such a mismatch is
+   visible in the launch log rather than only in a workload's throughput.
+
+
+8. **A queued worker site is cancelled after a fixed 10 minutes.** In
+   `app/dispatch_workers.sh` (at `8b5acb7`) the remote-site script submits the
+   worker job, then waits for its nodes to report in: `if [ ${attempt} -gt 300 ]`
+   (300 × 2 s) it prints `Timeout waiting for compute nodes after 10min` and exits,
+   and its `trap cleanup EXIT` runs `scancel` on the worker job.
+   - Why it matters: a site whose partition is busy (e.g. azure-cpu while a long heat
+     run holds the partition's whole node quota) or whose cloud nodes provision
+     slowly never joins: its worker job is cancelled instead of waiting in the queue,
+     and the cluster keeps running without that site. Upstream's own Walltime
+     tooltip suggests long-lived `cluster_only` clusters, where a late-joining site
+     is the expected case.
+   - Suggestion: make the node wait an input (per worker row, or a `0` = wait for
+     as long as the job is queued), and report a site that gave up in the dashboard
+     and the run log as "not joined (queued too long)", not only as an error line.

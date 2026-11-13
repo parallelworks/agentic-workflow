@@ -39,10 +39,12 @@ own server instance exposes only that agent's tools:
   spack_status(run_id)    read-only: `pw workflows runs view` of that build, waiting
                           a few minutes for it to finish. Never starts anything.
   ray-launcher-mcp (--tools launch_ray,ray_status,stop_ray), run when a human asks:
-  launch_ray([walltime])  STARTS workflows/ray.yaml (a local copy of ray-cluster's
+  launch_ray([walltime], [targets])
+                          STARTS workflows/ray.yaml (a local copy of ray-cluster's
                           general.yaml): Ray head + dashboard on the PW workspace, one
-                          worker row per cpu target (see ray_worker_row). Waits up to
-                          ~9 min for the endpoint; the cluster then stays up.
+                          worker row per cpu target, or per named target (see
+                          ray_worker_row). Waits up to ~9 min for the endpoint; the
+                          cluster then stays up.
   ray_status([run_id])    read-only: the cluster's workflow state and endpoint.
   stop_ray(run_id)        `pw endpoints delete ray-cluster-<slug>` (ray-cluster's
                           documented teardown), then waits for the endpoint to go.
@@ -68,7 +70,7 @@ Debug (no MCP):
         runs evaluate_run once (this DOES run the poll/fetch/validate workflows)
     python3 -I .agents/mcp/heat_server.py --spack-inputs <target>
         prints the spack.yaml inputs run_spack would stage; stages and runs nothing
-    python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime]
+    python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime] [target,target,...]
         prints the ray.yaml worker rows launch_ray would stage; stages and runs nothing
 
 It lives under .agents/ because pw code makes every agent edit there ask a human
@@ -2064,8 +2066,9 @@ LAUNCH_RAY_TOOL = {
     "title": "Start the Ray cluster across the fleet",
     "description": (
         "START a long-lived Ray cluster: head and live dashboard on the PW workspace, one worker "
-        "row per cpu target of sites/sites.yaml (slurm/pbs rows from the target's directives, "
-        "scheduler none targets as SSH workers on the login node). Waits up to about 9 minutes "
+        "row per cpu target of sites/sites.yaml, or per target named in `targets` (slurm/pbs rows "
+        "from the target's directives, scheduler none targets as SSH workers on the login node). "
+        "Waits up to about 9 minutes "
         "for the cluster to be ready. Returns ready (with the dashboard URL), starting (call "
         "mcp__heat__ray_status next), rejected or failed. Refused while another Ray cluster "
         "endpoint is running. The cluster stays up until mcp__heat__stop_ray or the workers' "
@@ -2078,6 +2081,10 @@ LAUNCH_RAY_TOOL = {
                          "description": "Worker walltime HH:MM:SS or D-HH:MM:SS for every slurm/pbs "
                                         "row (default: each target's own walltime)"},
             "ray_version": {"type": "string", "description": "Ray version, default 2.40.0"},
+            "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                        "description": "Worker targets by name from sites/sites.yaml, e.g. "
+                                       "[\"gce-cpu\", \"aws-cpu\"] (cpu targets only). Leave it "
+                                       "out to use every cpu target."},
         },
         "additionalProperties": False,
     },
@@ -2343,16 +2350,52 @@ def ray_worker_row(t, walltime=None):
     return row, notes
 
 
-def fleet_worker_rows(walltime=None):
-    """(rows, used, skipped): one row per cpu target (identical rows once)."""
+def ray_targets(value):
+    """The `targets` argument of launch_ray as a list of names, or None (every cpu
+    target). Accepts a list or a comma-separated string; raises Rejected on a bad
+    value, an unknown name or a gpu target (named targets are never skipped)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise Rejected("targets must be a list of target names from sites/sites.yaml")
+    names = []
+    for v in value:
+        v = v.strip()
+        if v and v not in names:
+            names.append(v)
+    if not names:
+        raise Rejected("targets is empty; leave it out to use every cpu target")
+    known = _target_names()
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise Rejected("unknown target(s) %s; valid targets: %s. Nothing was launched."
+                       % (", ".join(unknown), ", ".join(known) or "(none found)"))
+    for n in names:
+        t = _prep_target({"target": n})
+        if t["mode"] != "cpu":
+            raise Rejected("target %s is mode %s; Ray workers use cpu targets only. Nothing was "
+                           "launched." % (n, t["mode"]))
+    return names
+
+
+def fleet_worker_rows(walltime=None, targets=None):
+    """(rows, used, skipped): one row per cpu target (identical rows once), or per
+    target in `targets` (validated by ray_targets), in that order."""
     rows, used, skipped, seen = [], [], [], set()
-    for name in _target_names():
+    for name in (targets if targets is not None else _target_names()):
         try:
             t = _prep_target({"target": name})
         except Rejected as e:
+            if targets is not None:
+                raise
             skipped.append({"target": name, "reason": str(e)})
             continue
         if t["mode"] != "cpu":
+            if targets is not None:
+                raise Rejected("target %s is mode %s; Ray workers use cpu targets only"
+                               % (name, t["mode"]))
             skipped.append({"target": name, "reason": "mode %s (Ray workers use cpu targets)" % t["mode"]})
             continue
         row, notes = ray_worker_row(t, walltime)
@@ -2492,7 +2535,8 @@ def launch_ray(args):
                 raise Rejected("walltime must be HH:MM:SS or D-HH:MM:SS, got %r" % walltime)
         if not RAY_VERSION_RE.match(version):
             raise Rejected("ray_version must look like 2.40.0, got %r" % version)
-        rows, used, skipped = fleet_worker_rows(walltime)
+        targets = ray_targets(args.get("targets"))
+        rows, used, skipped = fleet_worker_rows(walltime, targets)
         if not rows:
             raise Rejected("no cpu target in sites/sites.yaml to use as a Ray worker")
         eps = _endpoints()
@@ -2520,7 +2564,7 @@ def launch_ray(args):
     _write_json(os.path.join(rdir, "ray.inputs.json"), inputs)
     _write_json(os.path.join(rdir, "workers.json"), {"workers": used, "skipped": skipped})
     rec = {"run_id": run_id, "op": "ray", "started": _now(), "walltime": walltime,
-           "ray_version": version, "workers": used, "skipped": skipped, "endpoints_before": sorted(eps)}
+           "ray_version": version, "targets_requested": targets, "workers": used, "skipped": skipped, "endpoints_before": sorted(eps)}
     try:
         srec, slug = _start(run_id, "ray")
         rec.update(argv=srec.get("argv"), workflow_run=slug)
@@ -3078,8 +3122,15 @@ if __name__ == "__main__":
             print(json.dumps({"status": "rejected", "error": str(e)}, indent=2))
             sys.exit(1)
         sys.exit(0)
-    if len(argv) in (1, 2) and argv[0] == "--ray-inputs":
-        rows, used, skipped = fleet_worker_rows(argv[1] if len(argv) == 2 else None)
+    if len(argv) in (1, 2, 3) and argv[0] == "--ray-inputs":
+        # --ray-inputs [walltime] [target,target,...] in either order
+        wt = next((a for a in argv[1:] if WALLTIME_RE.match(a)), None)
+        tl = next((a for a in argv[1:] if not WALLTIME_RE.match(a)), None)
+        try:
+            rows, used, skipped = fleet_worker_rows(wt, ray_targets(tl))
+        except Rejected as e:
+            print(json.dumps({"status": "rejected", "error": str(e)}, indent=2))
+            sys.exit(1)
         print(json.dumps({"workers": rows, "targets": used, "skipped": skipped}, indent=2))
         sys.exit(0)
     if len(argv) == 3 and argv[0] == "--compare":
@@ -3096,7 +3147,7 @@ if __name__ == "__main__":
     elif argv:
         sys.stderr.write("usage: heat_server.py [--tools a,b] | --stage-only <target> <grid> "
                          "[tol] [max_iter] | --evaluate <run_id> | --list [target] | --campaign [file] | "
-                         "--spack-inputs <target> | --ray-inputs [walltime] | "
+                         "--spack-inputs <target> | --ray-inputs [walltime] [t1,t2] | "
                          "--compare <mcp_run_id> <shell_run_id>\n")
         sys.exit(2)
     sys.exit(serve())

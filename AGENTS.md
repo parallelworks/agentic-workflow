@@ -281,11 +281,11 @@ when a human asks): `app/fractal/` is an N x N Mandelbrot canvas rendered tile b
 tile on ONE long-lived Ray cluster that spans every cpu target (see
 `app/fractal/README.md`).
 `ray-launcher-mcp` (`--tools launch_ray,ray_status,stop_ray`) owns the cluster:
-- `launch_ray([walltime])` stages `runs/ray-launcher-mcp-fleet-<NNNNNN>/` and runs
+- `launch_ray([walltime], [targets])` stages `runs/ray-launcher-mcp-fleet-<NNNNNN>/` and runs
   `workflows/ray.yaml`, a local copy of ray-cluster's `general.yaml`
   (`parallelworks/workflows`, provenance in its header) run as the top-level
   workflow, with the head and dashboard on the PW workspace and one worker
-  row per cpu target, mapped from the target's directives by `ray_worker_row` (the
+  row per cpu target (or per target named in `targets`, cpu targets only), mapped from the target's directives by `ray_worker_row` (the
   directives are never edited).
 - The cluster stays up after the run completes, until `stop_ray(run_id)` or the
   workers' walltime ends.

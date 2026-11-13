@@ -536,7 +536,7 @@ staged under `runs/<id>/` like the other tools' ids.
 <name>`, but only when the name matches `ray-cluster-*`. `stop_ray` is the only
 caller of the delete.
 
-**`launch_ray([walltime], [ray_version])`** stages `workflows/ray.yaml`. It is a
+**`launch_ray([walltime], [ray_version], [targets])`** stages `workflows/ray.yaml`. It is a
 byte-for-byte local copy of ray-cluster's `workflows/ray-cluster/yamls/general.yaml`
 (`parallelworks/workflows`; commit in its header), run as the TOP-LEVEL workflow.
 Calling it as a subworkflow fails: its app/ checkout lands in the subworkflow's
@@ -544,7 +544,11 @@ directory while its start script looks in the top-level run directory (run
 workable-ringtail, 2026-11-13; see HANDOFF.md, "Workflow Writing/Design Feedback").
 Its inputs (built by `ray_inputs`):
 - `head.resource: workspace`;
-- `workers`: one row per cpu target, built by `ray_worker_row` (identical rows once);
+- `workers`: one row per cpu target, built by `ray_worker_row` (identical rows once).
+  With `targets` (a list of names, or a comma-separated string), only those targets,
+  in that order (repeats dropped). An unknown name, a gpu target or an empty list
+  rejects the launch before anything is staged, and `cluster.json` records
+  `targets_requested`;
 - `ray_settings`: `name: ray-cluster` (the endpoint is `ray-cluster-<slug>`) and
   `ray_version`, default 2.40.0;
 - `workload_settings`: `workload_type: cluster_only`, `run_user_script: false`.
@@ -566,7 +570,7 @@ How a target becomes a worker row:
   `sites.yaml` is never edited.
 
 Debug the mapping without running anything:
-`python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime]`.
+`python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime] [target,target,...]`.
 
 `launch_ray` refuses while any `ray-cluster-*` endpoint is listed, because a new head
 stops any other Ray on its host. It records the endpoints listed before the launch.
