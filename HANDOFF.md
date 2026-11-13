@@ -168,6 +168,19 @@ siblings. Test results are in `results/agent-summary.md`.
      sees the same `/tmp` (not a per-run container);
    - `ray job submit` against `127.0.0.1:8265` on the head works, and a Ray Job
      driver reaches workers on remote sites (their 127.0.X.Y tunnel addresses).
+     CONFIRMED 2026-11-13 for an SSH worker: run composed-terrapin (`fractal.yaml`
+     add, 20 tiles on canvas ray-tests-canvas-000001 of saving-haddock) rendered all
+     20 on lab-cpu (`127.0.2.1`, site-2, 20 cores) at 9.9 tiles/s; the Slurm workers
+     had reached their 30-min walltime. Still to confirm on Slurm workers. The run
+     itself ended `error` although the render succeeded: `fractal.yaml` grepped
+     `ray job status` for SUCCEEDED/FAILED, but that command prints only prose
+     ("Job '<id>' succeeded") on stderr, so the state read UNKNOWN and the step
+     exited 4. Fixed: the state now comes from the Jobs API
+     (`JobSubmissionClient.get_job_status`), checked against a local Ray 2.60 job
+     that succeeded and one that failed, and on the platform by run humane-bunny
+     (next 20 tiles, `RAY_JOB_STATE=SUCCEEDED`, run completed, canvas 40/100).
+     (`render_status` reads the JSON result
+     line, so an agent would still have reported the render correctly.)
      Fallback: run `render.py add` directly in the workflow step, still on the
      head host;
    - inside a Slurm worker, `os.sched_getaffinity` sees the `--cpus-per-task`

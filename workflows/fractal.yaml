@@ -164,7 +164,9 @@ jobs:
               echo "SUBMITTED ray_job=$RUN_ID canvas=$CANVAS_ID"
               # Follow the driver's output until the Ray Job ends (its last line is the JSON record).
               ray job logs --address http://127.0.0.1:8265 --follow "$RUN_ID" || true
-              STATE="$(ray job status --address http://127.0.0.1:8265 "$RUN_ID" 2>/dev/null | grep -Eo 'SUCCEEDED|FAILED|STOPPED' | tail -1 || true)"
+              # Ask the Jobs API for the state. (`ray job status` only prints "Job '<id>'
+              # succeeded" etc., in prose and on stderr, so it cannot be grepped for a state.)
+              STATE="$("$VENV/bin/python" -c 'import sys; from ray.job_submission import JobSubmissionClient as C; print(C("http://127.0.0.1:8265").get_job_status(sys.argv[1]).value)' "$RUN_ID" 2>/dev/null || true)"
               echo "RAY_JOB_STATE=${STATE:-UNKNOWN}"
               touch "$HOME/pw-fractal/.src/$RUN_ID/RAY_JOB_DONE"
               # render.py exits 1 when some tiles failed; the JSON line says which.
