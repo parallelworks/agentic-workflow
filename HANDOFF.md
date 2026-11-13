@@ -105,6 +105,23 @@ siblings. Test results are in `results/agent-summary.md`.
        progress? Is the 15-minute limit configurable per agent or per session?
        Should a parent waiting on a foreground Task whose child is still working
        count as stalled? Hours-long jobs (grid 2048) need a supported way to wait.
+       2026-11-13 (session 20261113-142741-bd20623b): a `site-runner-mcp`
+       DELEGATED from the main session by a foreground Task (task-104, depth 1;
+       azure-cpu, grid 2048, run site-runner-mcp-azure-cpu-000015) stayed
+       active for 4.1 hours (16:00-20:08) through 34 `poll_heat` calls (each up
+       to ~7 min), and the main session waiting on that Task was not cut off
+       either. So a new tool call evidently counts as progress, the repeated-
+       poll pattern works, and a MAIN session may wait on a long foreground
+       Task. (An earlier note here called this session standalone; it was
+       delegated.) Narrows Q20 to a SUBAGENT parent (orchestrator-mcp, depth 1)
+       waiting on a depth-2 child, the 2026-11-12 case.
+       `maxTurns` may not be a firm limit: that session's digest records 41
+       turns against `maxTurns: 40` (35 tool calls: 1 `run_heat`, 34
+       `poll_heat`) and it still finished normally and reported. How pw counts
+       turns against `maxTurns`, and whether it ends the session exactly at the
+       limit, is unconfirmed. Plan on about 34-38 polls (roughly 4-4.4 hours)
+       per session (`.agents/mcp/README.md`, "Long jobs: how polling keeps the
+       session alive").
 4. **Older backlog:**
    - `write_summary` should reject numbers that aren't in `comparison.json`.
    - The procedure is duplicated between `site-runner.md` and AGENTS.md, and

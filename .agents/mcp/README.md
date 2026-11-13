@@ -65,6 +65,44 @@ mcpServers:
 
 The tools are exposed to the model as `mcp__heat__run_heat` and `mcp__heat__poll_heat`.
 
+### Long jobs: how polling keeps the session alive
+A heat job can sit in the queue and run for hours (grid 1024/2048, or nodes that are
+slow to provision). The agent cannot simply wait that long in one call, because two
+pw code limits apply:
+- **The MCP call timeout.** Each tool call must return within the server entry's
+  `timeout` (`"10m"` in the agent definition; pw code's default is 30 s).
+- **The stall limit.** pw code ends a subagent that makes no progress for 15 minutes
+  (`subagent stopped making progress for 15m0s`, HANDOFF.md Q20).
+
+`poll_heat` is built to stay under both. One call polls every 30 s
+(`POLL_INTERVAL_SECONDS`) for at most 420 s (`POLL_BUDGET_SECONDS`, about 7 min),
+then returns `done: false`, and the agent's instructions make its next call
+`poll_heat` again with the same `run_id`. Each call returns well before the
+10-minute timeout, and a new call starts well before 15 quiet minutes have passed,
+so the session waits indefinitely in ~7-minute steps without sleeping or idling.
+Every poll is still its own logged `poll.yaml` run (`<run_id>-poll-<N>`) and a line in
+`polls.jsonl`.
+
+Observed 2026-11-13: a `site-runner-mcp` delegated from the main session by a
+foreground Task (azure-cpu, grid 2048, run site-runner-mcp-azure-cpu-000015) stayed
+active in `pw code` for 4.1 hours through 34 `poll_heat` calls, and the main session
+waiting on it was not cut off. The Q20 cut-off happened with the run agent under
+`orchestrator-mcp` (a subagent parent), so the open question is a subagent waiting
+on a foreground Task.
+
+**Ceiling: `maxTurns`.** Each `poll_heat` call uses about one agent turn.
+`site-runner-mcp` has `maxTurns: 40`, so after `run_heat` and with room for the final
+report a session gets roughly 38 polls, about **4.4 hours** of waiting (38 × 7 min).
+The limit may not be firm: the 2048 session above recorded 41 turns (34 polls) and
+still finished normally, so how pw counts turns against `maxTurns` is unconfirmed
+(HANDOFF Q20). Plan on about 34-38 polls per session.
+A job that stays queued or running longer ends the session on `maxTurns` before it
+leaves the queue; the job itself keeps running, and a new session (or `poll.yaml` by
+hand) can pick it up by run id. For longer jobs, raise `maxTurns` in
+`.agents/agents/site-runner-mcp.md`, or raise `POLL_BUDGET_SECONDS` (it must stay
+safely under the 10-minute timeout, and every change to either is a human decision).
+The same pattern, with its own budgets, is used by `ray_status` and `render_status`.
+
 ## `evaluate_run` (v0.4.0, for `evaluator-mcp`)
 
 **`evaluate_run(run_id, [l2_tolerance])`** does in code what the `evaluator` does
