@@ -136,3 +136,126 @@ siblings. Test results are in `results/agent-summary.md`.
      site-prep-mcp-gce-cpu-000001.
    - Hooks re-trust (waiting on a colleague).
    - A future agent that fills in `sites.yaml` by inspecting existing clusters.
+5. **Ray fleet + fractal app** (branch `add-ray-launcher`, 2026-11-13): new agents
+   `ray-launcher-mcp` and `ray-runner-mcp`, heat_server v0.10.0, `workflows/ray.yaml`
+   and `workflows/fractal.yaml`, and `app/fractal/`. This was tested offline only: a
+   fake `pw`, plus a local Ray cluster shaped like ray-cluster's with the upstream
+   dashboard (see `.agents/mcp/README.md`). **Spike before the first agent run:**
+   hand-run `launch_ray` (or `pw workflows run` a staged `ray.yaml`) with one slurm
+   and one none target, then confirm:
+   - DONE 2026-11-13 (run workable-ringtail, a hand-run of the first `ray.yaml`, which
+     called ray-cluster as a subworkflow, with lab-cpu + azure-cpu): the list-typed
+     `workers` passed through intact and `head.resource: workspace` resolved, but the
+     head failed with `start_ray_head.sh: No such file or directory` (status 127)
+     and the run looped in `wait_for_endpoint` until the session runner gave up.
+     Cause and fix: see "Workflow Writing/Design Feedback" below. `ray.yaml` is now a
+     local copy of upstream `general.yaml` run top-level, with upstream's own input
+     schema (`ray_settings`, `workload_settings`). CONFIRMED 2026-11-13 by run
+     saving-haddock (that copy, run top-level by hand, workers lab-cpu + gce-cpu +
+     aws-cpu + oci-cpu): completed, endpoint `ray-cluster-saving-haddock` listed as
+     `name<TAB>running<TAB>url` (the format `_endpoints` falls back to), job dir
+     `/tmp/runs/saving-haddock/`, Ray head on the workspace at a 172.17.x address,
+     and the user saw every worker node join. Note the run completes as soon as the
+     FIRST worker CPU joins ("Cluster has 1 CPUs available"); the rest join after,
+     so `ready` does not mean every row is up;
+   - the endpoint is named `ray-cluster-<our slug>` (confirmed by workable-ringtail's
+     `wait_for_endpoint`), and `pw endpoints list` prints name / ... / url columns.
+     `_endpoints` tries `-o json` first, then the tab-separated table;
+   - `fractal.yaml` on the workspace finds the cluster's job dir. workable-ringtail's
+     job dir (`PW_PARENT_JOB_DIR`) was `/tmp/runs/<slug>/` on the workspace, not
+     `~/pw/jobs/<slug>/` as upstream's README says for CLI runs, so `fractal.yaml`
+     now searches both. Confirm that a later `fractal.yaml` run on the workspace
+     sees the same `/tmp` (not a per-run container);
+   - `ray job submit` against `127.0.0.1:8265` on the head works, and a Ray Job
+     driver reaches workers on remote sites (their 127.0.X.Y tunnel addresses).
+     Fallback: run `render.py add` directly in the workflow step, still on the
+     head host;
+   - inside a Slurm worker, `os.sched_getaffinity` sees the `--cpus-per-task`
+     cores (ray-cluster's `srun --ntasks=N` step is not `--exact`), so the per-node
+     pool is the target's cores per node;
+   - `stop_ray` leaves no `ray-worker-*` job behind (check with the capacity
+     workflow).
+
+   Open:
+   - The worker rows follow the heat targets' footprint. The pwdemo targets give
+     2 nodes × 2 cores per cloud cluster, which is small for fractal scaling runs. A
+     per-launch override (`cpus_per_node`, `nodes`), or Ray-specific fields in a
+     target, would be a human decision.
+   - The upstream dashboard's own counters (`total_completed`/`total_planned`, site
+     task counts) also count Ray Jobs and actor calls, so they run ahead of the
+     tiles. The canvas progress in `render_status` is the reliable number.
+   - A submission holds every node's single Ray slot while it runs. A second
+     concurrent submission waits for slots (up to `--node-wait`, 600 s) instead of
+     sharing them.
+   - Follow-ups: GPU worker rows (gpu targets are skipped); a fractal evaluator
+     (canvas checksum vs a local reference); non-square canvases (the dashboard
+     draws a square `grid_size`).
+
+
+## Workflow Writing/Design Feedback
+
+Lessons from using `parallelworks/workflows` from this repo, for the workflows
+repository's skills. Each one says what happened, what we did here, and what we
+suggest upstream.
+
+1. **A workflow that clones its own scripts must find them where the clone lands,
+   not under `PW_PARENT_JOB_DIR`.** (ray-cluster `yamls/general.yaml` at
+   `8b5acb7`, run workable-ringtail, 2026-11-13.)
+   - What happened: our first `workflows/ray.yaml` called `general.yaml` as a
+     subworkflow (`uses: github/parallelworks/workflows@canary`, `$yaml: ...`). Its
+     `preprocessing` Checkout step cloned `workflows/ray-cluster/app` into the
+     directory of the job running that step, which for a subworkflow is
+     `/tmp/runs/<slug>/subworkflows/ray/step_0/`. `app/start-template.sh` then set
+     `APP_DIR="${PW_PARENT_JOB_DIR}/workflows/ray-cluster/app"`, which is the
+     TOP-LEVEL run directory `/tmp/runs/<slug>/`. The head died at once with
+     `bash: .../workflows/ray-cluster/app/start_ray_head.sh: No such file or
+     directory` (status 127).
+   - Why it is easy to miss: run top-level, the job directory and
+     `PW_PARENT_JOB_DIR` are the same directory, so the bug only shows when the
+     workflow is nested. `general.yaml` itself nests `script_submitter` and
+     `wait_for_endpoint` without trouble because those do not clone and then look up
+     files by a parent path.
+   - What we did: `workflows/ray.yaml` is now a byte-for-byte local copy of
+     `general.yaml` (provenance header: repo, path, commit) that we stage under
+     `runs/<id>/` and run top-level with `pw workflows run`, as ray-cluster's README
+     "Running from the CLI" does. We did not change the workflows repository.
+   - Suggestion: resolve scripts relative to the checkout (e.g. pass the checkout
+     path as a step output, or `APP_DIR` from the script's own location), use one
+     directory variable consistently for both the clone and its readers, and add a
+     test that runs each reusable workflow as a subworkflow of a one-step wrapper.
+     If a workflow is not meant to be nested, say so in its README.
+
+2. **A failure that ends the service should end the wait for it promptly.**
+   - What happened: the head exited with status 127 right after it started (about
+     14:25:42), but `wait_for_endpoint` kept printing `Endpoint ... not found yet;
+     retrying in 10 seconds` until about 14:29:57, when the session runner job
+     noticed and cancelled it. To a user watching the log it looked like an endless
+     loop, and the real error was near the end of the `session_runner` output.
+   - Suggestion: have the waiter also stop on a marker the start script writes when
+     it exits (e.g. `HEAD_FAILED` in the job dir, like the existing
+     `DISPATCH_FAILED`), and print the head's exit status in the wait loop, so the
+     first error is also the last line the user sees.
+
+3. **Document where the job directory is.** ray-cluster's README says
+   `~/pw/jobs/<run-slug>/` for CLI runs; on the PW workspace,
+   workable-ringtail's `PW_PARENT_JOB_DIR` was `/tmp/runs/<slug>/`. Tools that find
+   a running cluster afterwards (our `fractal.yaml` reads `ENDPOINT_NAME`,
+   `RAY_HEAD_IP`, `SESSION_PORT` and `RAY_VENV_DIR` from it) need a stable answer.
+   We now search both places. Suggestion: state the rule in the README, or record the
+   job dir somewhere discoverable by endpoint name (e.g. in the endpoint's metadata
+   or a fixed `~/pw/endpoints/<endpoint-name>` link).
+
+4. **Pinning is only partial when a copied workflow still pulls `@canary`.** Our
+   copy is pinned to `8b5acb7`, but its Checkout step clones `app/` from branch
+   `canary`, and its `session_runner` and `wait_for_endpoint` jobs use
+   `github/parallelworks/workflows@canary`. A later upstream change to `app/` can
+   therefore break our older copy of the YAML. Suggestion: let the checkout ref and
+   the nested `uses:` refs follow one input (default `canary`), so a caller can pin
+   the whole workflow to a commit.
+
+5. **Hidden inputs with defaults are part of the interface.** The endpoint name is
+   `${{ inputs.ray_settings.name }}-${PW_RUN_SLUG}`, from a hidden input defaulting
+   to `ray-cluster`. Callers that need the endpoint name (to find or delete the
+   cluster) depend on that default, so we pass `ray_settings.name: ray-cluster`
+   explicitly. Suggestion: document hidden inputs that shape externally visible
+   names, or print the endpoint name as a step output early in the run.

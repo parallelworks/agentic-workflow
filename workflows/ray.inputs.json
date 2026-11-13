@@ -1,0 +1,41 @@
+{
+  "head": {
+    "resource": "workspace"
+  },
+  "workers": [
+    {
+      "resource": "pw://<user>/<slurm-cluster>",
+      "scheduler": true,
+      "slurm": {
+        "partition": "<the target's #SBATCH --partition>",
+        "nodes": 1,
+        "gres": "",
+        "time": "<the target's #SBATCH --time, or the launch walltime>",
+        "scheduler_directives": "<the target's other directive lines, verbatim>"
+      }
+    },
+    {
+      "resource": "pw://<user>/<pbs-cluster>",
+      "scheduler": true,
+      "pbs": {
+        "queue": "<the target's #PBS -q>",
+        "nodes": 1,
+        "select": "<the target's -l select=..., if any>",
+        "walltime": "<the target's -l walltime, or the launch walltime>",
+        "scheduler_directives": "<the target's other directive lines, verbatim>"
+      }
+    },
+    {
+      "resource": "pw://<user>/<no-scheduler-cluster>",
+      "scheduler": false
+    }
+  ],
+  "ray_settings": {
+    "name": "ray-cluster",
+    "ray_version": "2.40.0"
+  },
+  "workload_settings": {
+    "workload_type": "cluster_only",
+    "run_user_script": false
+  }
+}

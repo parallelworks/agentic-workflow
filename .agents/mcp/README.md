@@ -1,14 +1,16 @@
 # `heat` MCP server — run, evaluate and compare tools
 
 `heat_server.py` is a lightweight, **stdlib-only** (Python ≥ 3.9) MCP server with
-ten tools. Each agent launches its own server process, and the `--tools` flag
+sixteen tools. Each agent launches its own server process, and the `--tools` flag
 decides which tools that process serves: the default (no flag) is `run_heat` and
 `poll_heat` for `site-runner-mcp`, exactly as before v0.4.0; `--tools
 evaluate_run` serves only `evaluate_run`, for `evaluator-mcp`; `--tools
 list_runs,compare_runs,write_summary` serves the three for `compare-agents`; `--tools
 list_runs,load_campaign,run_heat,poll_heat,evaluate_run` serves five for
 `orchestrator-mcp` (see below for why it also serves its subagents' tools); `--tools
-copy_buildcache,run_spack,spack_status` serves three for `site-prep-mcp`. A tool that is not
+copy_buildcache,run_spack,spack_status` serves three for `site-prep-mcp`; `--tools
+launch_ray,ray_status,stop_ray` serves three for `ray-launcher-mcp`; `--tools
+new_canvas,render_tiles,render_status,ray_status` serves four for `ray-runner-mcp`. A tool that is not
 served is absent from `tools/list` and refused by `tools/call` (`-32602`).
 
 **`run_heat(target, grid, [tol], [max_iter])`** does in code exactly what
@@ -515,9 +517,111 @@ without running anything: `python3 -I .agents/mcp/heat_server.py --spack-inputs
 returning early when the run ends, with `state`, `jobs`, `done` and
 `succeeded`, and appends each check to `statuses.jsonl`. A run id from any other
 tool is rejected. On success spack-builder leaves a placeholder endpoint
-`spack-builder-<run slug>` running; the server cannot remove it (`pw endpoints`
-is not allowlisted), so a human deletes it.
+`spack-builder-<run slug>` running; the server cannot remove it (`pw endpoints
+delete` is allowlisted only for `ray-cluster-*` names, see v0.10.0), so a human
+deletes it.
 
 Untested against a cluster as of 2026-11-10; in particular, that the subworkflow
 fills spack-builder inputs the wrapper does not pass with their defaults.
 
+## Ray fleet tools (v0.10.0, for `ray-launcher-mcp` and `ray-runner-mcp`)
+These tools are outside the campaign flow. They run one long-lived Ray cluster that
+spans every cpu target, and the bag-of-tasks app `app/fractal/` (see its README)
+pushes tiles into it. Ids are
+`ray-launcher-mcp-fleet-<NNNNNN>` and `ray-runner-mcp-fleet-<NNNNNN>`. They take
+`fleet` instead of a target because the cluster spans every target. Each id is
+staged under `runs/<id>/` like the other tools' ids.
+
+`_pw()` now also allows read-only `pw endpoints list` and `pw endpoints delete
+<name>`, but only when the name matches `ray-cluster-*`. `stop_ray` is the only
+caller of the delete.
+
+**`launch_ray([walltime], [ray_version])`** stages `workflows/ray.yaml`. It is a
+byte-for-byte local copy of ray-cluster's `workflows/ray-cluster/yamls/general.yaml`
+(`parallelworks/workflows`; commit in its header), run as the TOP-LEVEL workflow.
+Calling it as a subworkflow fails: its app/ checkout lands in the subworkflow's
+directory while its start script looks in the top-level run directory (run
+workable-ringtail, 2026-11-13; see HANDOFF.md, "Workflow Writing/Design Feedback").
+Its inputs (built by `ray_inputs`):
+- `head.resource: workspace`;
+- `workers`: one row per cpu target, built by `ray_worker_row` (identical rows once);
+- `ray_settings`: `name: ray-cluster` (the endpoint is `ray-cluster-<slug>`) and
+  `ray_version`, default 2.40.0;
+- `workload_settings`: `workload_type: cluster_only`, `run_user_script: false`.
+
+How a target becomes a worker row:
+- **slurm**: `--partition`/`-p`, `--time`/`-t` and `--nodes`/`-N` become the row's
+  fields. `--ntasks-per-node` × `--cpus-per-task` becomes one
+  `--cpus-per-task=<cores per node>` line, because ray-cluster runs ONE worker task
+  per node. That keeps the target's cores per node.
+- Lines ray-cluster's worker job writes itself are left out: `--ntasks`/`-n`,
+  `--job-name`/`-J`, `--output`, `--error`, `--export`. Everything else goes to
+  `scheduler_directives` verbatim.
+- **pbs**: `-q`, `-l walltime=` and `-l select=` become fields. `:mpiprocs=K` is
+  dropped from the select string: it lists a node K times, while ray-cluster starts
+  one worker per node index. `-N`, `-j`, `-o`, `-e` and `-V` are left out; other
+  lines pass verbatim.
+- **scheduler none**: `scheduler: false`, an SSH worker on the login node.
+- `walltime` overrides the time of every slurm/pbs row. gpu targets are skipped.
+  `sites.yaml` is never edited.
+
+Debug the mapping without running anything:
+`python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime]`.
+
+`launch_ray` refuses while any `ray-cluster-*` endpoint is listed, because a new head
+stops any other Ray on its host. It records the endpoints listed before the launch.
+It then checks every 15 s, for up to 9 min, for the workflow to complete and its
+endpoint to be listed. The endpoint is found as `ray-cluster-<slug>`; failing that,
+as the one new `ray-cluster-*` endpoint; failing that, as the name in the run's log.
+The result is `ready`, `starting`, `rejected` or `failed`. State goes to
+`cluster.json` and the rows to `workers.json`.
+
+**`ray_status([run_id])`** is read-only and refreshes `cluster.json`:
+- `ready`: the workflow completed and the endpoint is listed.
+- `starting`: the workflow is still running. While starting, it re-checks for up to
+  7 min.
+- `failed`: the workflow ended in error.
+- `stopped`: the endpoint is gone.
+
+With no run id it checks the newest launcher id.
+
+**`stop_ray(run_id)`** runs `pw endpoints delete ray-cluster-<slug>` and waits up to
+3 min for the endpoint to leave the list. It is safe to call again; an endpoint that
+is already gone returns `stopped`. ray-cluster's teardown then cancels the worker
+jobs and stops Ray.
+
+**`new_canvas(tiles, [tile_px], [max_iter], [palette], [cluster_run_id])`** needs a
+`ready` cluster. It stages `workflows/fractal.yaml` with `action: init` and waits up
+to 5 min. On the workspace the workflow:
+1. sparse-clones `app/fractal` at the commit;
+2. finds the cluster's job dir by its `ENDPOINT_NAME`;
+3. runs `render.py init` with the cluster's venv.
+
+The canvas id is this call's run id, and the record is `canvas.json`.
+
+**`render_tiles(canvas_id, count|all|rect, [order])`** stages `action: add`.
+- The workflow `ray job submit`s `render.py add` to the head (Ray Jobs, port 8265),
+  then follows `ray job logs` until the job ends. Cancelling the workflow runs
+  `ray job stop`.
+- The tool returns `submitted` once the log shows `SUBMITTED ray_job=` (at most 2
+  min). If the render already finished by then, it returns its result
+  (`added`/`partial`/`failed`). The record is `submit.json`.
+
+**`render_status(run_id)`** is read-only on the platform side.
+- For a render id it checks every 20 s for up to 7 min. It returns the driver's
+  final JSON line (`rendered`, `failed`, `tiles_per_s`, `nodes`, `cores`,
+  `per_site`, `canvas`) and the latest `k/n tiles` progress line, and appends to
+  `statuses.jsonl`.
+- For a canvas id it runs `action: status` as `<canvas-id>-status-<n>`, staged in
+  the canvas's own dir.
+
+Tested offline on 2026-11-13. A fake `pw` exercised every success and rejection path
+of the six tools. `render.py` ran as a Ray Job on a local Ray cluster shaped like
+ray-cluster's (head `--num-cpus=0`, two `--num-cpus=1` nodes) against the upstream
+dashboard:
+- incremental adds;
+- two concurrent submissions with no duplicate tile;
+- a canvas checksum equal to the local reference;
+- `redraw` after a dashboard reset.
+
+Not yet run on the platform. The spike in HANDOFF.md lists what to confirm first.

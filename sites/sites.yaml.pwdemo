@@ -69,7 +69,7 @@ targets:
       #SBATCH --partition=cpu
       #SBATCH --nodes=2
       #SBATCH --ntasks-per-node=2
-      #SBATCH --time=00:30:00
+      #SBATCH --time=02:00:00
 
   - name: aws-cpu
     ssh_name: pw://pwdemo.stefan/aws
@@ -86,7 +86,7 @@ targets:
       #SBATCH --partition=cpu
       #SBATCH --nodes=2
       #SBATCH --ntasks-per-node=2
-      #SBATCH --time=00:30:00
+      #SBATCH --time=02:00:00
 
   - name: oci-cpu
     ssh_name: pw://pwdemo.stefan/oci
@@ -103,7 +103,7 @@ targets:
       #SBATCH --partition=cpu
       #SBATCH --nodes=2
       #SBATCH --ntasks-per-node=2
-      #SBATCH --time=00:30:00
+      #SBATCH --time=02:00:00
 
   - name: azure-cpu
     ssh_name: pw://pwdemo.stefan/azure
@@ -112,15 +112,15 @@ targets:
     mpi_ranks: 4
     mpi_launch: "mpiexec"
     env_load:
-      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64_v3:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
+      - export MODULEPATH=/home/pwdemo.stefan/pw/software/modules/linux-rocky9-broadwell:/home/pwdemo.stefan/pw/software/modules/linux-rocky9-x86_64:$MODULEPATH
       - module load gcc
       - module load openmpi
     directives: |
       #SBATCH --job-name=heat_cpu
       #SBATCH --partition=cpu
-      #SBATCH --nodes=2
-      #SBATCH --ntasks-per-node=2
-      #SBATCH --time=00:30:00
+      #SBATCH --nodes=4
+      #SBATCH --ntasks-per-node=1
+      #SBATCH --time=02:00:00
 
   # ---- Cloud cluster, GPU nodes ----
 
@@ -139,7 +139,7 @@ targets:
       #SBATCH --partition=gpu
       #SBATCH --nodes=1
       #SBATCH --ntasks-per-node=1
-      #SBATCH --time=00:30:00
+      #SBATCH --time=02:00:00
 
   # ---- Single host (no scheduler) ----
 

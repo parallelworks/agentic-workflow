@@ -38,12 +38,29 @@ own server instance exposes only that agent's tools:
                           target. Returns at start; a build can take hours.
   spack_status(run_id)    read-only: `pw workflows runs view` of that build, waiting
                           a few minutes for it to finish. Never starts anything.
+  ray-launcher-mcp (--tools launch_ray,ray_status,stop_ray), run when a human asks:
+  launch_ray([walltime])  STARTS workflows/ray.yaml (a local copy of ray-cluster's
+                          general.yaml): Ray head + dashboard on the PW workspace, one
+                          worker row per cpu target (see ray_worker_row). Waits up to
+                          ~9 min for the endpoint; the cluster then stays up.
+  ray_status([run_id])    read-only: the cluster's workflow state and endpoint.
+  stop_ray(run_id)        `pw endpoints delete ray-cluster-<slug>` (ray-cluster's
+                          documented teardown), then waits for the endpoint to go.
+  ray-runner-mcp (--tools new_canvas,render_tiles,render_status,ray_status):
+  new_canvas(tiles, ...)  runs workflows/fractal.yaml action=init: an EMPTY N x N
+                          canvas of app/fractal on the cluster's dashboard.
+  render_tiles(canvas_id, count|all|rect)  STARTS fractal.yaml action=add (a Ray
+                          Job on the head); returns once it is submitted.
+  render_status(run_id)   read-only: waits a few minutes for a render's result line,
+                          or (canvas id) runs action=status for the canvas progress.
 
 Launch (stdio transport; this is what each agent's mcpServers entry runs):
     python3 -I .agents/mcp/heat_server.py                        # site-runner-mcp
     python3 -I .agents/mcp/heat_server.py --tools evaluate_run   # evaluator-mcp
     python3 -I .agents/mcp/heat_server.py --tools list_runs,load_campaign   # orchestrator-mcp
     python3 -I .agents/mcp/heat_server.py --tools copy_buildcache,run_spack,spack_status   # site-prep-mcp
+    python3 -I .agents/mcp/heat_server.py --tools launch_ray,ray_status,stop_ray   # ray-launcher-mcp
+    python3 -I .agents/mcp/heat_server.py --tools new_canvas,render_tiles,render_status,ray_status   # ray-runner-mcp
 Debug (no MCP):
     python3 -I .agents/mcp/heat_server.py --stage-only <target> <grid> [tol] [max_iter]
         stage only, no submit; prints the staged inputs
@@ -51,6 +68,8 @@ Debug (no MCP):
         runs evaluate_run once (this DOES run the poll/fetch/validate workflows)
     python3 -I .agents/mcp/heat_server.py --spack-inputs <target>
         prints the spack.yaml inputs run_spack would stage; stages and runs nothing
+    python3 -I .agents/mcp/heat_server.py --ray-inputs [walltime]
+        prints the ray.yaml worker rows launch_ray would stage; stages and runs nothing
 
 It lives under .agents/ because pw code makes every agent edit there ask a human
 first (fails in -p), so no agent can rewrite the server or its _site_query.py.
@@ -68,7 +87,8 @@ pw code behavior the spec does not describe is marked with a "spec says X; pw
 code does Y" comment.
 
 Constraints enforced in code: the ONLY cluster action is `pw workflows run`
-(plus read-only `pw workflows runs view|logs` to read a run's outcome) — see
+(plus read-only `pw workflows runs view|logs` to read a run's outcome, read-only
+`pw endpoints list`, and `pw endpoints delete ray-cluster-*` for stop_ray) — see
 _pw(). No ssh, no scp, no environment dumps, no secret files.
 """
 import base64
@@ -82,7 +102,7 @@ import sys
 import time
 
 SERVER_NAME = "heat"
-SERVER_VERSION = "0.9.0"
+SERVER_VERSION = "0.10.0"
 AGENT_NAME = "site-runner-mcp"  # run-id prefix: site-runner-mcp-<target>-<NNNNNN>
 
 MODERN_VERSIONS = ["2026-07-28"]
@@ -166,7 +186,9 @@ def _instructions():
                     + ([COMPARE_INSTRUCTIONS] if "compare_runs" in served else [])
                     + ([CAMPAIGN_INSTRUCTIONS] if "load_campaign" in served else [])
                     + ([PREP_INSTRUCTIONS] if set(served) & {"copy_buildcache", "run_spack",
-                                                             "spack_status"} else []))
+                                                             "spack_status"} else [])
+                    + ([RAY_LAUNCH_INSTRUCTIONS] if "launch_ray" in served else [])
+                    + ([RAY_RUN_INSTRUCTIONS] if "render_tiles" in served else []))
 
 RUN_TOOL = {
     "name": "run_heat",
@@ -540,10 +562,14 @@ TRACE = None
 # --------------------------------------------------------------------------
 def _pw(argv, timeout):
     """The ONLY way this server touches the platform. Allowlisted verbs:
-    `workflows run` (the submission) and read-only `workflows runs view|logs`.
-    Anything else — pw ssh, scp, other verbs — is refused by construction."""
+    `workflows run` (the submission), read-only `workflows runs view|logs` and
+    `endpoints list`, and `endpoints delete ray-cluster-<slug>` (stop_ray only: the
+    documented ray-cluster teardown). Anything else — pw ssh, scp, other verbs — is
+    refused by construction."""
     allowed = argv[:2] == ["workflows", "run"] or (
         argv[:2] == ["workflows", "runs"] and len(argv) > 2 and argv[2] in ("view", "logs")
+    ) or argv[:2] == ["endpoints", "list"] or (
+        argv[:2] == ["endpoints", "delete"] and len(argv) == 3 and bool(ENDPOINT_RE.match(argv[2]))
     )
     if not allowed:
         raise RuntimeError("refused non-allowlisted pw command: pw %s" % " ".join(argv[:3]))
@@ -1977,6 +2003,914 @@ def spack_status(args):
 
 
 # --------------------------------------------------------------------------
+# Ray fleet: ray-launcher-mcp (launch_ray, ray_status, stop_ray) and
+# ray-runner-mcp (new_canvas, render_tiles, render_status, ray_status).
+# One long-lived Ray cluster spans every cpu target (workflows/ray.yaml, head on
+# the PW workspace); the fractal app (app/fractal/) pushes tiles into it through
+# workflows/fractal.yaml. Ids: ray-launcher-mcp-fleet-<NNNNNN> and
+# ray-runner-mcp-fleet-<NNNNNN> (the cluster spans the fleet, not one target).
+# --------------------------------------------------------------------------
+RAY_LAUNCHER = "ray-launcher-mcp"
+RAY_RUNNER = "ray-runner-mcp"
+FLEET = "fleet"
+RAY_LAUNCH_ID_RE = re.compile(r"^%s-%s-\d{6}$" % (re.escape(RAY_LAUNCHER), FLEET))
+RAY_RUN_ID_RE = re.compile(r"^%s-%s-\d{6}$" % (re.escape(RAY_RUNNER), FLEET))
+ENDPOINT_RE = re.compile(r"^ray-cluster-[A-Za-z0-9._-]+$")
+WALLTIME_RE = re.compile(r"^(\d+-)?\d{1,3}:\d{2}:\d{2}$")
+RAY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+DEFAULT_RAY_VERSION = "2.40.0"
+RAY_LAUNCH_BUDGET_SECONDS = 540   # stays under the agent's 10m MCP timeout
+RAY_STATUS_BUDGET_SECONDS = 420
+RAY_STATUS_INTERVAL_SECONDS = 15
+STOP_BUDGET_SECONDS = 180
+CANVAS_BUDGET_SECONDS = 300
+RENDER_START_BUDGET_SECONDS = 120
+RENDER_STATUS_BUDGET_SECONDS = 420
+RENDER_STATUS_INTERVAL_SECONDS = 20
+FRACTAL_LIMITS = {"tiles": (1, 256), "tile_px": (8, 4096), "max_iter": (1, 1000000)}
+FRACTAL_DEFAULTS = {"tile_px": 128, "max_iter": 256, "palette": "electric"}
+FRACTAL_PALETTES = ("electric", "fire", "ocean", "cosmic")
+FRACTAL_ORDERS = ("random", "row", "center", "spiral")
+RECT_RE = re.compile(r"^\d+,\d+,\d+,\d+$")
+
+_SB = r"^#SBATCH\s+"
+SBATCH_NODES_RE = re.compile(_SB + r"(?:--nodes[= ]\s*|-N\s*)(\d+)\s*$")
+SBATCH_NTPN_RE = re.compile(_SB + r"--ntasks-per-node[= ]\s*(\d+)\s*$")
+SBATCH_CPT_RE = re.compile(_SB + r"(?:--cpus-per-task[= ]\s*|-c\s*)(\d+)\s*$")
+# Lines upstream's worker job writes itself (--nodes/--ntasks/--job-name/--output/
+# --error/--export) or that describe heat's MPI task layout: not passed to Ray rows.
+SBATCH_RAY_DROP_RE = re.compile(_SB + r"(?:--ntasks(?:[= ]|$)|-n\s*\d|--job-name\b|-J\s|--output\b|"
+                                      r"-o\s|--error\b|-e\s|--export\b)")
+PBS_QUEUE_RE = re.compile(r"^#PBS\s+-q\s+(\S+)\s*$")
+PBS_WALLTIME_RE = re.compile(r"^#PBS\s+-l\s+walltime=(\S+)\s*$")
+PBS_SELECT_RE = re.compile(r"^#PBS\s+-l\s+select=(\S+)\s*$")
+PBS_RAY_DROP_RE = re.compile(r"^#PBS\s+(?:-N\b|-j\b|-o\b|-e\b|-V\b)")
+
+RAY_LAUNCH_INSTRUCTIONS = (
+    "Ray fleet cluster. To start it, call mcp__heat__launch_ray once; it builds one worker row "
+    "per cpu target of sites/sites.yaml and returns a run_id. If it returns starting, call "
+    "mcp__heat__ray_status with that run_id until it is ready or failed. Only stop a cluster "
+    "with mcp__heat__stop_ray when the user asks for that."
+)
+RAY_RUN_INSTRUCTIONS = (
+    "Fractal tiles on the running Ray cluster. mcp__heat__new_canvas shows an empty N x N "
+    "canvas on the dashboard and returns its canvas_id. mcp__heat__render_tiles renders more "
+    "tiles into a canvas (count, all, or rect) and returns a run_id at once. "
+    "mcp__heat__render_status with that run_id waits for the render and reports it."
+)
+
+LAUNCH_RAY_TOOL = {
+    "name": "launch_ray",
+    "title": "Start the Ray cluster across the fleet",
+    "description": (
+        "START a long-lived Ray cluster: head and live dashboard on the PW workspace, one worker "
+        "row per cpu target of sites/sites.yaml (slurm/pbs rows from the target's directives, "
+        "scheduler none targets as SSH workers on the login node). Waits up to about 9 minutes "
+        "for the cluster to be ready. Returns ready (with the dashboard URL), starting (call "
+        "mcp__heat__ray_status next), rejected or failed. Refused while another Ray cluster "
+        "endpoint is running. The cluster stays up until mcp__heat__stop_ray or the workers' "
+        "walltime ends."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "walltime": {"type": "string",
+                         "description": "Worker walltime HH:MM:SS or D-HH:MM:SS for every slurm/pbs "
+                                        "row (default: each target's own walltime)"},
+            "ray_version": {"type": "string", "description": "Ray version, default 2.40.0"},
+        },
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["ready", "starting", "rejected", "failed"]},
+            "run_id": {"type": ["string", "null"]},
+            "workflow_run": {"type": ["string", "null"]},
+            "endpoint": {"type": ["string", "null"]},
+            "dashboard_url": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
+RAY_STATUS_TOOL = {
+    "name": "ray_status",
+    "title": "State of a Ray fleet cluster",
+    "description": (
+        "Read-only: the state of a Ray cluster mcp__heat__launch_ray started (default: the most "
+        "recent one). While it is starting, waits up to a few minutes for it. Returns status "
+        "ready, starting, failed or stopped, with the endpoint and dashboard URL. Never starts "
+        "or stops anything."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string",
+                       "description": "e.g. ray-launcher-mcp-fleet-000001 (default: the most recent)"},
+        },
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["ready", "starting", "failed", "stopped", "rejected"]},
+            "run_id": {"type": ["string", "null"]},
+            "live": {"type": "boolean"},
+            "endpoint": {"type": ["string", "null"]},
+            "dashboard_url": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
+STOP_RAY_TOOL = {
+    "name": "stop_ray",
+    "title": "Stop a Ray fleet cluster",
+    "description": (
+        "STOP the Ray cluster that mcp__heat__launch_ray started with this run_id: deletes its "
+        "endpoint (pw endpoints delete ray-cluster-<slug>), which stops the dashboard, cancels "
+        "every worker job and stops Ray. Only when the user asks. Returns stopped or failed."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string", "description": "e.g. ray-launcher-mcp-fleet-000001"},
+        },
+        "required": ["run_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["stopped", "rejected", "failed"]},
+            "run_id": {"type": "string"},
+            "endpoint": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "run_id"],
+    },
+}
+
+NEW_CANVAS_TOOL = {
+    "name": "new_canvas",
+    "title": "Show an empty fractal canvas on the Ray dashboard",
+    "description": (
+        "Create a new N x N fractal canvas on the running Ray cluster and show it EMPTY on the "
+        "dashboard (replacing the canvas shown before). Nothing is rendered yet: call "
+        "mcp__heat__render_tiles with the returned canvas_id. tiles is the tiles per side "
+        "(1-256, total tiles = tiles^2); tile_px the pixels per tile side (8-4096, default 128); "
+        "max_iter the iterations per pixel (default 256). Work per tile grows with "
+        "tile_px^2 x max_iter."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "tiles": {"type": "integer", "description": "Tiles per side, e.g. 10 for 10 x 10"},
+            "tile_px": {"type": "integer", "description": "Pixels per tile side (default 128)"},
+            "max_iter": {"type": "integer", "description": "Iterations per pixel (default 256)"},
+            "palette": {"type": "string", "enum": list(FRACTAL_PALETTES)},
+            "cluster_run_id": {"type": "string",
+                               "description": "The launch run id (default: the most recent ready cluster)"},
+        },
+        "required": ["tiles"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["canvas_ready", "rejected", "failed"]},
+            "canvas_id": {"type": ["string", "null"]},
+            "total_tiles": {"type": ["integer", "null"]},
+            "dashboard_url": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
+RENDER_TILES_TOOL = {
+    "name": "render_tiles",
+    "title": "Render more tiles into a fractal canvas",
+    "description": (
+        "Render more tiles of a canvas (canvas_id from mcp__heat__new_canvas) on the Ray cluster; "
+        "they appear on the dashboard as they finish. Give exactly one of: count (that many tiles "
+        "not yet rendered), all (every remaining tile), or rect \"x0,y0,x1,y1\" (a block of tile "
+        "coordinates). order picks which free tiles go first (random, row, center, spiral). "
+        "Returns a run_id as soon as the render is running; call mcp__heat__render_status with "
+        "it. Every call starts a NEW render."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "canvas_id": {"type": "string", "description": "e.g. ray-runner-mcp-fleet-000001"},
+            "count": {"type": "integer", "description": "Number of tiles to render"},
+            "all": {"type": "boolean", "description": "Render every tile not yet rendered"},
+            "rect": {"type": "string", "description": "x0,y0,x1,y1 tile block (inclusive)"},
+            "order": {"type": "string", "enum": list(FRACTAL_ORDERS)},
+        },
+        "required": ["canvas_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string",
+                       "enum": ["submitted", "added", "partial", "failed", "rejected"]},
+            "run_id": {"type": ["string", "null"]},
+            "canvas_id": {"type": ["string", "null"]},
+            "dashboard_url": {"type": ["string", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status"],
+    },
+}
+
+RENDER_STATUS_TOOL = {
+    "name": "render_status",
+    "title": "Check a fractal render or a canvas",
+    "description": (
+        "Read-only. With a run_id from mcp__heat__render_tiles: waits up to a few minutes for that "
+        "render and returns done, and when done the rendered/failed counts, tiles per second, "
+        "tiles per site and the canvas progress. With a canvas_id: the canvas progress (tiles "
+        "done of total, per site). Never renders anything."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string",
+                       "description": "A render run id or a canvas id (ray-runner-mcp-fleet-NNNNNN)"},
+        },
+        "required": ["run_id"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string", "enum": ["checked", "rejected", "failed"]},
+            "run_id": {"type": "string"},
+            "done": {"type": "boolean"},
+            "result": {"type": ["object", "null"]},
+            "next": {"type": ["string", "null"]},
+            "error": {"type": ["string", "null"]},
+        },
+        "required": ["status", "run_id", "done"],
+    },
+}
+
+
+# ---- worker rows from sites.yaml -----------------------------------------
+def ray_worker_row(t, walltime=None):
+    """One ray-cluster worker row for a resolved cpu target; returns (row, notes).
+    The target's directives are mapped, never edited: slurm --partition/--time/--nodes
+    and pbs -q/-l walltime/-l select become the row's fields; --ntasks-per-node x
+    --cpus-per-task becomes --cpus-per-task (ray-cluster runs ONE task per node, so
+    that keeps the target's cores per node); lines ray-cluster's worker job writes
+    itself are left out; everything else passes verbatim."""
+    notes = []
+    if t["scheduler"] == "none":
+        return {"resource": t["ssh_name"], "scheduler": False}, ["SSH worker on the login node"]
+    lines = []
+    if t["scheduler"] == "slurm":
+        partition, tm, nodes, ntpn, cpt = "", "", 1, None, None
+        for line in t["directives"].splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            for rx, key in ((SBATCH_PARTITION_RE, "p"), (SBATCH_TIME_RE, "t"), (SBATCH_NODES_RE, "n"),
+                            (SBATCH_NTPN_RE, "k"), (SBATCH_CPT_RE, "c")):
+                m = rx.match(s)
+                if m:
+                    break
+            if m:
+                v = m.group(1)
+                if key == "p":
+                    partition = v
+                elif key == "t":
+                    tm = v
+                elif key == "n":
+                    nodes = int(v)
+                elif key == "k":
+                    ntpn = int(v)
+                else:
+                    cpt = int(v)
+                continue
+            if SBATCH_RAY_DROP_RE.match(s):
+                notes.append("left out %r (set by ray-cluster)" % s)
+                continue
+            lines.append(s)
+        if ntpn or cpt:
+            per_node = (ntpn or 1) * (cpt or 1)
+            lines.append("#SBATCH --cpus-per-task=%d" % per_node)
+            notes.append("one Ray worker per node with %d cpus (the target's cores per node)" % per_node)
+        row = {"resource": t["ssh_name"], "scheduler": True,
+               "slurm": {"partition": partition, "nodes": nodes, "gres": "",
+                         "time": walltime or tm or "01:00:00", "scheduler_directives": "\n".join(lines)}}
+        return row, notes
+    queue, wall, select, nodes = "", "", "", 1
+    for line in t["directives"].splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        mq, mw, ms = PBS_QUEUE_RE.match(s), PBS_WALLTIME_RE.match(s), PBS_SELECT_RE.match(s)
+        if mq:
+            queue = mq.group(1)
+        elif mw:
+            wall = mw.group(1)
+        elif ms:
+            select = ms.group(1)
+            # mpiprocs=K lists a node K times in PBS_NODEFILE, while ray-cluster starts
+            # one worker per node index; keep ncpus (the cores), drop mpiprocs.
+            if re.search(r":mpiprocs=\d+", select):
+                select = re.sub(r":mpiprocs=\d+", "", select)
+                notes.append("dropped mpiprocs from select (one Ray worker per node)")
+            mn = re.match(r"^(\d+)", select)
+            nodes = int(mn.group(1)) if mn else 1
+        elif PBS_RAY_DROP_RE.match(s):
+            notes.append("left out %r (set by ray-cluster)" % s)
+        else:
+            lines.append(s)
+    row = {"resource": t["ssh_name"], "scheduler": True,
+           "pbs": {"queue": queue, "nodes": nodes, "select": select,
+                   "walltime": walltime or wall or "01:00:00", "scheduler_directives": "\n".join(lines)}}
+    return row, notes
+
+
+def fleet_worker_rows(walltime=None):
+    """(rows, used, skipped): one row per cpu target (identical rows once)."""
+    rows, used, skipped, seen = [], [], [], set()
+    for name in _target_names():
+        try:
+            t = _prep_target({"target": name})
+        except Rejected as e:
+            skipped.append({"target": name, "reason": str(e)})
+            continue
+        if t["mode"] != "cpu":
+            skipped.append({"target": name, "reason": "mode %s (Ray workers use cpu targets)" % t["mode"]})
+            continue
+        row, notes = ray_worker_row(t, walltime)
+        key = json.dumps(row, sort_keys=True)
+        if key in seen:
+            skipped.append({"target": name, "reason": "same worker row as an earlier target"})
+            continue
+        seen.add(key)
+        rows.append(row)
+        used.append({"target": name, "row": len(rows) - 1, "resource": t["ssh_name"],
+                     "scheduler": t["scheduler"], "notes": notes})
+    return rows, used, skipped
+
+
+# ---- endpoints ------------------------------------------------------------
+def _endpoints():
+    """{name: url} of the ray-cluster-* endpoints (read-only `pw endpoints list`).
+    Tries -o json first, then the tab-separated table ray-cluster itself parses
+    (name in column 1, url in column 3)."""
+    eps = {}
+    rc, out, _ = _pw(["endpoints", "list", "-o", "json"], timeout=60)
+    if rc == 0:
+        try:
+            data = json.loads(out)
+            items = data if isinstance(data, list) else (data.get("endpoints") or data.get("items") or [])
+            for e in items:
+                if isinstance(e, dict) and isinstance(e.get("name"), str):
+                    eps[e["name"]] = e.get("url") or e.get("URL") or e.get("link") or ""
+            return {k: v for k, v in eps.items() if k.startswith("ray-cluster-")}
+        except ValueError:
+            pass
+    rc, out, err = _pw(["endpoints", "list"], timeout=60)
+    if rc != 0:
+        raise RuntimeError("pw endpoints list failed: %s" % (err or out).strip()[-500:])
+    for line in out.splitlines():
+        cols = [c.strip() for c in line.split("\t")]
+        if cols and cols[0].startswith("ray-cluster-"):
+            eps[cols[0]] = cols[2] if len(cols) > 2 else ""
+    return eps
+
+
+def _find_endpoint(slug, before, eps):
+    """The endpoint of the ray.yaml run `slug`: ray-cluster-<slug>, else the one
+    new ray-cluster-* endpoint since launch, else the name its log prints."""
+    if "ray-cluster-%s" % slug in eps:
+        return "ray-cluster-%s" % slug
+    new = [n for n in eps if n not in before]
+    if len(new) == 1:
+        return new[0]
+    _, lout, _ = _pw(["workflows", "runs", "logs", slug], timeout=60)
+    m = re.findall(r"(ray-cluster-[A-Za-z0-9._-]+)", lout)
+    for name in reversed(m):
+        if ENDPOINT_RE.match(name) and name != "ray-cluster-":
+            return name
+    return None
+
+
+def _launch_ids():
+    try:
+        names = os.listdir(RUNS)
+    except OSError:
+        return []
+    return sorted(n for n in names if RAY_LAUNCH_ID_RE.match(n))
+
+
+def _cluster_record(run_id):
+    rec = _read_json(os.path.join(RUNS, run_id, "cluster.json")) if RAY_LAUNCH_ID_RE.match(run_id or "") else None
+    return rec if isinstance(rec, dict) else None
+
+
+def _cluster_state(run_id, wait=False):
+    """Refresh runs/<run_id>/cluster.json from the workflow run and the endpoint
+    list; while starting and `wait`, keep checking up to RAY_STATUS_BUDGET_SECONDS."""
+    rec = _cluster_record(run_id)
+    if not rec or not rec.get("workflow_run"):
+        raise Rejected("unknown cluster run_id %r: pass the run_id mcp__heat__launch_ray returned "
+                       "(e.g. %s-%s-000001)" % (run_id, RAY_LAUNCHER, FLEET))
+    slug = rec["workflow_run"]
+    deadline = time.time() + (RAY_STATUS_BUDGET_SECONDS if wait else 0)
+    while True:
+        view = _view(slug)
+        state = view.get("status")
+        eps = _endpoints()
+        if not rec.get("endpoint"):
+            rec["endpoint"] = _find_endpoint(slug, set(rec.get("endpoints_before") or []), eps)
+        live = bool(rec.get("endpoint")) and rec["endpoint"] in eps
+        if live and eps.get(rec["endpoint"]):
+            rec["dashboard_url"] = eps[rec["endpoint"]]
+        if rec.get("status") == "stopped" and not live:
+            status = "stopped"
+        elif state in TERMINAL and state != "completed":
+            status = "failed"
+        elif state == "completed":
+            status = "ready" if live else "stopped"
+        else:
+            status = "starting"
+        if status != "starting" or time.time() + RAY_STATUS_INTERVAL_SECONDS > deadline:
+            break
+        time.sleep(RAY_STATUS_INTERVAL_SECONDS)
+    rec.update(status=status, workflow_status=state, live=live, checked=_now())
+    if status == "failed" and not rec.get("error"):
+        rec["error"] = "workflow %s ended %s; failed step log tail:\n%s" % (slug, state, _failed_tail(slug))
+    if status == "ready" and not rec.get("ready_at"):
+        rec["ready_at"] = _now()
+    _write_json(os.path.join(RUNS, run_id, "cluster.json"), rec)
+    return rec
+
+
+def _cluster_result(rec, base_status=None):
+    out = {"status": base_status or rec.get("status"), "run_id": rec.get("run_id"),
+           "workflow_run": rec.get("workflow_run"), "workflow_status": rec.get("workflow_status"),
+           "live": bool(rec.get("live")), "endpoint": rec.get("endpoint"),
+           "dashboard_url": rec.get("dashboard_url"), "workers": rec.get("workers"),
+           "walltime": rec.get("walltime"), "next": None, "error": rec.get("error")}
+    return out
+
+
+def ray_inputs(rows, version):
+    """ray.inputs.json for workflows/ray.yaml, the local copy of ray-cluster's general.yaml
+    run as the TOP-LEVEL workflow (as a subworkflow its app/ checkout lands where its
+    start script does not look). name ray-cluster makes the endpoint ray-cluster-<slug>."""
+    return {"head": {"resource": "workspace"}, "workers": rows,
+            "ray_settings": {"name": "ray-cluster", "ray_version": version},
+            "workload_settings": {"workload_type": "cluster_only", "run_user_script": False}}
+
+
+def launch_ray(args):
+    """Returns (structured_result, is_error, run_id_or_None)."""
+    base = {"status": "rejected", "run_id": None, "workflow_run": None, "endpoint": None,
+            "dashboard_url": None, "next": None, "error": None}
+    walltime = args.get("walltime")
+    version = str(args.get("ray_version") or DEFAULT_RAY_VERSION).strip()
+    try:
+        if walltime is not None:
+            walltime = str(walltime).strip()
+            if not WALLTIME_RE.match(walltime):
+                raise Rejected("walltime must be HH:MM:SS or D-HH:MM:SS, got %r" % walltime)
+        if not RAY_VERSION_RE.match(version):
+            raise Rejected("ray_version must look like 2.40.0, got %r" % version)
+        rows, used, skipped = fleet_worker_rows(walltime)
+        if not rows:
+            raise Rejected("no cpu target in sites/sites.yaml to use as a Ray worker")
+        eps = _endpoints()
+        if eps:
+            owners = {}
+            for rid in _launch_ids():
+                r = _cluster_record(rid) or {}
+                if r.get("endpoint") in eps:
+                    owners[r["endpoint"]] = rid
+            raise Rejected("a Ray cluster endpoint is already running (%s). Only one Ray head runs on "
+                           "the workspace: use it, or stop it first (mcp__heat__stop_ray with its "
+                           "run_id) if the user asks. Nothing was launched."
+                           % ", ".join("%s from %s" % (n, owners.get(n, "outside this repo")) for n in eps))
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    except Exception as e:  # pw missing, sites.yaml unreadable...
+        base.update(status="failed", error=str(e))
+        return base, True, None
+
+    run_id = allocate_dir(RAY_LAUNCHER, FLEET)
+    rdir = os.path.join(RUNS, run_id)
+    shutil.copyfile(os.path.join(WORKFLOWS, "ray.yaml"), os.path.join(rdir, "ray.yaml"))
+    inputs = ray_inputs(rows, version)
+    _write_json(os.path.join(rdir, "ray.inputs.json"), inputs)
+    _write_json(os.path.join(rdir, "workers.json"), {"workers": used, "skipped": skipped})
+    rec = {"run_id": run_id, "op": "ray", "started": _now(), "walltime": walltime,
+           "ray_version": version, "workers": used, "skipped": skipped, "endpoints_before": sorted(eps)}
+    try:
+        srec, slug = _start(run_id, "ray")
+        rec.update(argv=srec.get("argv"), workflow_run=slug)
+        if not slug:
+            rec.update(status="failed", error=srec.get("error"))
+    except Exception as e:
+        slug = None
+        rec.update(status="failed", error=str(e))
+    _write_json(os.path.join(rdir, "cluster.json"), rec)
+    if slug:
+        try:
+            deadline = time.time() + RAY_LAUNCH_BUDGET_SECONDS
+            while True:
+                rec = _cluster_state(run_id)
+                if rec["status"] != "starting" or time.time() + RAY_STATUS_INTERVAL_SECONDS > deadline:
+                    break
+                time.sleep(RAY_STATUS_INTERVAL_SECONDS)
+        except Exception as e:
+            rec = _cluster_record(run_id) or rec
+            rec.update(status="failed", error=str(e))
+            _write_json(os.path.join(rdir, "cluster.json"), rec)
+    result = _cluster_result(rec)
+    result["skipped"] = skipped
+    if rec["status"] == "ready":
+        result["next"] = ("The cluster is ready and keeps running. Report the run_id, the endpoint and "
+                          "the dashboard_url, and stop. Do not stop the cluster unless the user asks.")
+    elif rec["status"] == "starting":
+        result["next"] = ("The cluster is still starting. Call mcp__heat__ray_status with run_id %s. "
+                          "Never call mcp__heat__launch_ray again for it." % run_id)
+    else:
+        result["next"] = "Report the error verbatim and stop."
+    return result, rec["status"] not in ("ready", "starting"), run_id
+
+
+def ray_status(args):
+    run_id = str(args.get("run_id") or "").strip()
+    base = {"status": "rejected", "run_id": run_id or None, "live": False, "endpoint": None,
+            "dashboard_url": None, "next": None, "error": None}
+    if not run_id:
+        ids = _launch_ids()
+        if not ids:
+            base["error"] = "no Ray cluster has been launched from this repo (no %s-* run)" % RAY_LAUNCHER
+            return base, True, None
+        run_id = ids[-1]
+    try:
+        rec = _cluster_state(run_id, wait=True)
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    except Exception as e:
+        base.update(status="failed", run_id=run_id, error=str(e))
+        return base, True, run_id
+    result = _cluster_result(rec)
+    result["next"] = {
+        "ready": "The cluster is ready. Report it and stop.",
+        "starting": "Still starting. Call mcp__heat__ray_status again with run_id %s, or stop if your "
+                    "instructions say so." % run_id,
+        "stopped": "The cluster is not running (stopped, or its endpoint is gone). Report it.",
+        "failed": "The launch failed. Report the error verbatim and stop.",
+    }[rec["status"]]
+    return result, False, run_id
+
+
+def stop_ray(args):
+    run_id = str(args.get("run_id") or "").strip()
+    base = {"status": "rejected", "run_id": run_id, "endpoint": None, "next": None, "error": None}
+    rec = _cluster_record(run_id)
+    if not rec or not rec.get("workflow_run"):
+        base["error"] = ("unknown cluster run_id %r: pass the run_id mcp__heat__launch_ray returned"
+                         % run_id)
+        return base, True, None
+    try:
+        rec = _cluster_state(run_id)
+        ep = rec.get("endpoint")
+        base["endpoint"] = ep
+        if not ep or not ENDPOINT_RE.match(ep):
+            raise Rejected("cluster %s has no known ray-cluster endpoint; nothing was stopped" % run_id)
+        if not rec.get("live"):
+            rec.update(status="stopped", stopped=rec.get("stopped") or _now())
+            _write_json(os.path.join(RUNS, run_id, "cluster.json"), rec)
+            base.update(status="stopped", next="The endpoint was already gone; nothing to stop. Report it.")
+            return base, False, run_id
+        rc, out, err = _pw(["endpoints", "delete", ep], timeout=120)
+        rec["stop"] = {"argv": ["pw", "endpoints", "delete", ep], "exit_code": rc, "at": _now(),
+                       "output": (out or err).strip()[-500:]}
+        deadline = time.time() + STOP_BUDGET_SECONDS
+        while ep in _endpoints():
+            if time.time() > deadline:
+                raise RuntimeError("endpoint %s is still listed %d s after pw endpoints delete (exit %d): %s"
+                                   % (ep, STOP_BUDGET_SECONDS, rc, (err or out).strip()[-300:]))
+            time.sleep(10)
+        rec.update(status="stopped", live=False, stopped=_now())
+        _write_json(os.path.join(RUNS, run_id, "cluster.json"), rec)
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, run_id
+    except Exception as e:
+        base.update(status="failed", error=str(e), next="Report the error verbatim and stop.")
+        return base, True, run_id
+    base.update(status="stopped", next=("The endpoint is deleted; ray-cluster's teardown cancels the "
+                                        "worker jobs and stops Ray. Report it and stop."))
+    return base, False, run_id
+
+
+# ---- fractal canvases and renders ----------------------------------------
+def _live_cluster(cluster_run_id=None):
+    """(launch run id, cluster record) of a READY cluster, or raise Rejected."""
+    cid = str(cluster_run_id or "").strip()
+    if not cid:
+        ids = _launch_ids()
+        if not ids:
+            raise Rejected("no Ray cluster has been launched; ask ray-launcher-mcp to launch one")
+        cid = ids[-1]
+    rec = _cluster_state(cid)
+    if rec["status"] != "ready":
+        raise Rejected("Ray cluster %s is %s, not ready; ask ray-launcher-mcp about it. Nothing was "
+                       "rendered." % (cid, rec["status"]))
+    return cid, rec
+
+
+def _fractal_inputs(run_id, action, canvas_id, endpoint, **fields):
+    inputs = {"action": action, "run_id": run_id, "canvas_id": canvas_id, "endpoint": endpoint,
+              "repo_url": _git("remote", "get-url", "origin"), "commit": _git("rev-parse", "HEAD")}
+    for key in ("tiles", "tile_px", "max_iter", "palette", "count", "all", "rect", "order"):
+        v = fields.get(key)
+        inputs[key] = "" if v is None else (("true" if v else "") if isinstance(v, bool) else str(v))
+    return inputs
+
+
+def _start_fractal(dir_id, inputs_name, name):
+    """`pw workflows run` runs/<dir_id>/fractal.yaml with the named inputs file."""
+    rel = "runs/%s" % dir_id
+    argv = ["workflows", "run", "-i", "%s/%s" % (rel, inputs_name), "--name", name, "-o", "json",
+            "%s/fractal.yaml" % rel]
+    rc, out, err = _pw(argv, timeout=120)
+    slug = _find_slug(out)
+    rec = {"argv": ["pw"] + argv, "exit_code": rc, "workflow_run": slug, "started": _now()}
+    if not slug:
+        rec["error"] = "pw workflows run did not return a run slug: " + (err or out).strip()[-1500:]
+    return rec, slug
+
+
+def _fractal_log(slug, tail=80):
+    _, lout, _ = _pw(["workflows", "runs", "logs", "--job", "fractal", "--tail", str(tail), slug], timeout=60)
+    return lout
+
+
+def _stage_fractal(inputs_maker):
+    run_id = allocate_dir(RAY_RUNNER, FLEET)
+    rdir = os.path.join(RUNS, run_id)
+    shutil.copyfile(os.path.join(WORKFLOWS, "fractal.yaml"), os.path.join(rdir, "fractal.yaml"))
+    inputs = inputs_maker(run_id)
+    _write_json(os.path.join(rdir, "fractal.inputs.json"), inputs)
+    return run_id, rdir, inputs
+
+
+def _canvas_record(canvas_id):
+    rec = _read_json(os.path.join(RUNS, canvas_id, "canvas.json")) if RAY_RUN_ID_RE.match(canvas_id or "") else None
+    return rec if isinstance(rec, dict) and rec.get("status") == "canvas_ready" else None
+
+
+def new_canvas(args):
+    base = {"status": "rejected", "canvas_id": None, "total_tiles": None, "dashboard_url": None,
+            "next": None, "error": None}
+    try:
+        vals = {}
+        for key in ("tiles", "tile_px", "max_iter"):
+            if key == "tiles" or args.get(key) is not None:
+                v = _as_int(key, args.get(key))
+                lo, hi = FRACTAL_LIMITS[key]
+                if not lo <= v <= hi:
+                    raise Rejected("%s must be %d..%d, got %d" % (key, lo, hi, v))
+                vals[key] = v
+            else:
+                vals[key] = FRACTAL_DEFAULTS[key]
+        palette = str(args.get("palette") or FRACTAL_DEFAULTS["palette"]).strip()
+        if palette not in FRACTAL_PALETTES:
+            raise Rejected("palette must be one of %s" % ", ".join(FRACTAL_PALETTES))
+        cid, crec = _live_cluster(args.get("cluster_run_id"))
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    except Exception as e:
+        base.update(status="failed", error=str(e))
+        return base, True, None
+    run_id, rdir, inputs = _stage_fractal(lambda rid: _fractal_inputs(
+        rid, "init", rid, crec["endpoint"], palette=palette, **vals))
+    rec = {"run_id": run_id, "op": "init", "cluster_run_id": cid, "endpoint": crec["endpoint"],
+           "dashboard_url": crec.get("dashboard_url"), "tiles": vals["tiles"], "tile_px": vals["tile_px"],
+           "max_iter": vals["max_iter"], "palette": palette, "commit": inputs["commit"]}
+    try:
+        srec, slug = _start_fractal(run_id, "fractal.inputs.json", run_id)
+        rec.update(srec)
+        if slug:
+            view = _wait_terminal(slug, CANVAS_BUDGET_SECONDS)
+            rec["workflow_status"] = view.get("status")
+            found = _json_line(_fractal_log(slug), "status") if view.get("status") == "completed" else None
+            if found and found.get("status") == "canvas_ready":
+                rec.update(status="canvas_ready", canvas=found)
+            elif view.get("status") in TERMINAL:
+                rec.update(status="failed", error="workflow %s ended %s; log tail:\n%s"
+                           % (slug, view.get("status"), _failed_tail(slug) or _fractal_log(slug, 20)))
+            else:
+                rec.update(status="failed", error="workflow %s was still %s after %d s"
+                           % (slug, view.get("status") or "unknown", CANVAS_BUDGET_SECONDS))
+        else:
+            rec["status"] = "failed"
+    except Exception as e:
+        rec.update(status="failed", error=str(e))
+    rec["finished"] = _now()
+    _write_json(os.path.join(rdir, "canvas.json"), rec)
+    base.update(status=rec["status"], workflow_run=rec.get("workflow_run"), error=rec.get("error"),
+                dashboard_url=rec.get("dashboard_url"), cluster_run_id=cid)
+    if rec["status"] == "canvas_ready":
+        base.update(canvas_id=run_id, total_tiles=vals["tiles"] ** 2, tiles=vals["tiles"],
+                    tile_px=vals["tile_px"], max_iter=vals["max_iter"], palette=palette,
+                    next=("The canvas is empty on the dashboard. To render tiles, call "
+                          "mcp__heat__render_tiles with canvas_id %s." % run_id))
+    else:
+        base["next"] = "Report the error verbatim and stop."
+    return base, rec["status"] != "canvas_ready", run_id
+
+
+def render_tiles(args):
+    canvas_id = str(args.get("canvas_id") or "").strip()
+    base = {"status": "rejected", "run_id": None, "canvas_id": canvas_id, "dashboard_url": None,
+            "next": None, "error": None}
+    try:
+        crec = _canvas_record(canvas_id)
+        if not crec:
+            raise Rejected("unknown canvas_id %r: pass the canvas_id mcp__heat__new_canvas returned "
+                           "(e.g. %s-%s-000001)" % (canvas_id, RAY_RUNNER, FLEET))
+        total = crec["tiles"] ** 2
+        count = args.get("count")
+        all_ = args.get("all") is True
+        rect = args.get("rect")
+        given = [k for k, v in (("count", count), ("all", all_ or None), ("rect", rect)) if v not in (None, "")]
+        if len(given) != 1:
+            raise Rejected("give exactly one of count, all or rect (got %s)" % (", ".join(given) or "none"))
+        if count is not None:
+            count = _as_int("count", count)
+            if not 1 <= count <= total:
+                raise Rejected("count must be 1..%d (the canvas has %d tiles)" % (total, total))
+        if rect is not None:
+            rect = str(rect).replace(" ", "")
+            if not RECT_RE.match(rect) or any(int(v) >= crec["tiles"] for v in rect.split(",")):
+                raise Rejected("rect must be x0,y0,x1,y1 with every value 0..%d" % (crec["tiles"] - 1))
+        order = str(args.get("order") or "random").strip()
+        if order not in FRACTAL_ORDERS:
+            raise Rejected("order must be one of %s" % ", ".join(FRACTAL_ORDERS))
+        cid, clu = _live_cluster(crec.get("cluster_run_id"))
+        if clu.get("endpoint") != crec.get("endpoint"):
+            raise Rejected("canvas %s belongs to cluster %s, which is no longer running; create a new "
+                           "canvas" % (canvas_id, crec.get("cluster_run_id")))
+    except Rejected as e:
+        base["error"] = str(e)
+        return base, True, None
+    except Exception as e:
+        base.update(status="failed", error=str(e))
+        return base, True, None
+    run_id, rdir, inputs = _stage_fractal(lambda rid: _fractal_inputs(
+        rid, "add", canvas_id, crec["endpoint"], count=count, all=all_, rect=rect, order=order))
+    rec = {"run_id": run_id, "op": "add", "canvas_id": canvas_id, "cluster_run_id": cid,
+           "endpoint": crec["endpoint"], "count": count, "all": all_, "rect": rect, "order": order,
+           "commit": inputs["commit"]}
+    base.update(run_id=run_id, dashboard_url=clu.get("dashboard_url"))
+    try:
+        srec, slug = _start_fractal(run_id, "fractal.inputs.json", run_id)
+        rec.update(srec)
+        if slug:
+            deadline = time.time() + RENDER_START_BUDGET_SECONDS
+            while True:
+                view = _view(slug)
+                lout = _fractal_log(slug)
+                found = _json_line(lout, "submission")
+                if view.get("status") in TERMINAL:
+                    if found:
+                        rec.update(status=found.get("status", "failed"), result=found)
+                    else:
+                        rec.update(status="failed", error="workflow %s ended %s; log tail:\n%s"
+                                   % (slug, view.get("status"), _failed_tail(slug) or lout[-2000:]))
+                    break
+                if "SUBMITTED ray_job=" in lout:
+                    rec["status"] = "submitted"
+                    break
+                if time.time() > deadline:
+                    rec["status"] = "submitted"
+                    rec["note"] = "the workflow is still staging after %d s" % RENDER_START_BUDGET_SECONDS
+                    break
+                time.sleep(5)
+            rec["workflow_status"] = view.get("status")
+        else:
+            rec["status"] = "failed"
+    except Exception as e:
+        rec.update(status="failed", error=str(e))
+    rec["finished"] = _now()
+    _write_json(os.path.join(rdir, "submit.json"), rec)
+    base.update(status=rec["status"], workflow_run=rec.get("workflow_run"), error=rec.get("error"),
+                result=rec.get("result"))
+    if rec["status"] == "submitted":
+        base["next"] = ("The render is running; tiles appear on the dashboard as they finish. Call "
+                        "mcp__heat__render_status with run_id %s. Never call mcp__heat__render_tiles "
+                        "again for this request." % run_id)
+    elif rec["status"] in ("added", "partial"):
+        base["next"] = "The render already finished. Report its result and stop."
+    else:
+        base["next"] = "Report the error verbatim and stop."
+    return base, rec["status"] not in ("submitted", "added", "partial"), run_id
+
+
+def render_status(args):
+    run_id = str(args.get("run_id") or "").strip()
+    base = {"status": "rejected", "run_id": run_id, "done": False, "result": None, "next": None, "error": None}
+    rdir = os.path.join(RUNS, run_id)
+    sub = _read_json(os.path.join(rdir, "submit.json")) if RAY_RUN_ID_RE.match(run_id) else None
+    canvas = _canvas_record(run_id)
+    if isinstance(sub, dict) and sub.get("op") == "add" and sub.get("workflow_run"):
+        slug = sub["workflow_run"]
+        log_path = os.path.join(rdir, "statuses.jsonl")
+        deadline = time.time() + RENDER_STATUS_BUDGET_SECONDS
+        try:
+            while True:
+                view = _view(slug)
+                state = view.get("status")
+                lout = _fractal_log(slug)
+                found = _json_line(lout, "submission")
+                prog = [l.strip() for l in lout.splitlines() if re.search(r"\d+/\d+ tiles \(", l)]
+                with open(log_path, "a") as fh:
+                    fh.write(json.dumps({"ts": _now(), "state": state,
+                                         "progress": prog[-1] if prog else None}, separators=(",", ":")) + "\n")
+                if state in TERMINAL or found or time.time() + RENDER_STATUS_INTERVAL_SECONDS > deadline:
+                    break
+                time.sleep(RENDER_STATUS_INTERVAL_SECONDS)
+        except Exception as e:
+            base.update(status="failed", error=str(e))
+            return base, True, run_id
+        done = bool(found) or state in TERMINAL
+        base.update(status="checked", done=done, workflow_run=slug, workflow_status=state, result=found,
+                    progress=prog[-1] if prog else None, canvas_id=sub.get("canvas_id"))
+        if found:
+            sub["result"] = found
+            sub["final_state"] = state
+            _write_json(os.path.join(rdir, "submit.json"), sub)
+            base["next"] = "The render finished. Report its result and stop."
+        elif done:
+            base["error"] = "workflow %s ended %s without a result line; log tail:\n%s" % (
+                slug, state, _failed_tail(slug) or lout[-2000:])
+            base["next"] = "The render failed. Report the error verbatim and stop."
+        else:
+            base["next"] = ("Still rendering (%s). Call mcp__heat__render_status again with run_id %s, or "
+                            "stop if your instructions say so." % (base["progress"] or "starting", run_id))
+        return base, bool(done and not found), run_id
+    if canvas:
+        # A canvas id: run fractal.yaml action=status, staged in the canvas's own dir.
+        try:
+            _, clu = _live_cluster(canvas.get("cluster_run_id"))
+            n = 1
+            while os.path.exists(os.path.join(rdir, "status-%d.inputs.json" % n)):
+                n += 1
+            name = "%s-status-%d" % (run_id, n)
+            _write_json(os.path.join(rdir, "status-%d.inputs.json" % n),
+                        _fractal_inputs(name, "status", run_id, canvas["endpoint"]))
+            srec, slug = _start_fractal(run_id, "status-%d.inputs.json" % n, name)
+            if not slug:
+                raise RuntimeError(srec.get("error"))
+            view = _wait_terminal(slug, CANVAS_BUDGET_SECONDS)
+            found = _json_line(_fractal_log(slug), "canvas")
+            if not found:
+                raise RuntimeError("status workflow %s ended %s without a result line; log tail:\n%s"
+                                   % (slug, view.get("status"), _failed_tail(slug)))
+        except Rejected as e:
+            base["error"] = str(e)
+            return base, True, run_id
+        except Exception as e:
+            base.update(status="failed", error=str(e))
+            return base, True, run_id
+        base.update(status="checked", done=True, result=found, workflow_run=slug, canvas_id=run_id,
+                    next="Report the canvas progress and stop.")
+        return base, False, run_id
+    base["error"] = ("unknown run_id %r: pass a run_id mcp__heat__render_tiles returned or a canvas_id "
+                     "from mcp__heat__new_canvas" % run_id)
+    return base, True, None
+
+
+ALL_TOOLS.update({"launch_ray": LAUNCH_RAY_TOOL, "ray_status": RAY_STATUS_TOOL, "stop_ray": STOP_RAY_TOOL,
+                  "new_canvas": NEW_CANVAS_TOOL, "render_tiles": RENDER_TILES_TOOL,
+                  "render_status": RENDER_STATUS_TOOL})
+
+
+# --------------------------------------------------------------------------
 # JSON-RPC / MCP protocol
 # --------------------------------------------------------------------------
 class RpcError(Exception):
@@ -2028,7 +2962,10 @@ def handle(method, params):
                 "list_runs": list_runs, "compare_runs": compare_runs,
                 "write_summary": write_summary,
                 "load_campaign": load_campaign, "copy_buildcache": copy_buildcache,
-                "run_spack": run_spack, "spack_status": spack_status}.get(name) if name in served else None
+                "run_spack": run_spack, "spack_status": spack_status,
+                "launch_ray": launch_ray, "ray_status": ray_status, "stop_ray": stop_ray,
+                "new_canvas": new_canvas, "render_tiles": render_tiles,
+                "render_status": render_status}.get(name) if name in served else None
         if tool is None:
             raise RpcError(-32602, "Unknown tool: %s" % name)
         args = params.get("arguments") or {}
@@ -2141,6 +3078,10 @@ if __name__ == "__main__":
             print(json.dumps({"status": "rejected", "error": str(e)}, indent=2))
             sys.exit(1)
         sys.exit(0)
+    if len(argv) in (1, 2) and argv[0] == "--ray-inputs":
+        rows, used, skipped = fleet_worker_rows(argv[1] if len(argv) == 2 else None)
+        print(json.dumps({"workers": rows, "targets": used, "skipped": skipped}, indent=2))
+        sys.exit(0)
     if len(argv) == 3 and argv[0] == "--compare":
         res, err, _ = compare_runs({"mcp_run_id": argv[1], "shell_run_id": argv[2]})
         print(json.dumps(res, indent=2))
@@ -2155,7 +3096,7 @@ if __name__ == "__main__":
     elif argv:
         sys.stderr.write("usage: heat_server.py [--tools a,b] | --stage-only <target> <grid> "
                          "[tol] [max_iter] | --evaluate <run_id> | --list [target] | --campaign [file] | "
-                         "--spack-inputs <target> | "
+                         "--spack-inputs <target> | --ray-inputs [walltime] | "
                          "--compare <mcp_run_id> <shell_run_id>\n")
         sys.exit(2)
     sys.exit(serve())

@@ -163,6 +163,29 @@ deliberate one-node run is valid; a *silent* collapse to one node is the bug.
 
 ---
 
+## Optional exercise — Bag of tasks on a fleet-wide Ray cluster (20 min)
+
+Heat is tightly coupled: one allocation, one cluster, every rank waits for its
+neighbours. `app/fractal/` is the opposite, a canvas of independent tiles that any
+node on any cluster can render. Steps:
+1. Ask `ray-launcher-mcp` to launch the Ray cluster. It spans every cpu target, and
+   the head and dashboard run on the workspace.
+2. Open the dashboard URL it reports.
+3. Ask `ray-runner-mcp` for a new canvas (e.g. 40 × 40 tiles at 64 px), then render
+   it in increments: 20 tiles, then 500, then the rest. Watch the tiles arrive,
+   coloured by site.
+4. Compare `tiles_per_s` and the per-site counts between increments. Then try a
+   relaunch with a different walltime, or a fleet with fewer targets.
+
+Discussion points:
+- Why can't heat use Ray's elasticity, and why doesn't fractal need MPI?
+- What does the canvas checksum prove? It is the same whichever sites rendered the
+  canvas.
+- Ask `ray-launcher-mcp` to stop the cluster at the end; it holds worker
+  allocations until then.
+
+---
+
 ## Appendix: the future multi-node multi-GPU seams
 
 This repo runs single-node GPU and multi-node CPU today, by design. It

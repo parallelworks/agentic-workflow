@@ -1,0 +1,16 @@
+{
+  "action": "<init|add|status|redraw>",
+  "run_id": "<agent>-fleet-<NNNNNN>",
+  "canvas_id": "<for init: the run_id; otherwise the canvas's id>",
+  "endpoint": "ray-cluster-<slug of the ray.yaml run>",
+  "repo_url": "<autodetected: git remote get-url origin; user may override>",
+  "commit": "<autodetected: git rev-parse HEAD; user may override>",
+  "tiles": "",
+  "tile_px": "",
+  "max_iter": "",
+  "palette": "",
+  "count": "",
+  "all": "",
+  "rect": "",
+  "order": ""
+}

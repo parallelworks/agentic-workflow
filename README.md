@@ -72,11 +72,14 @@ kept for comparison but are no longer used.
 ```
 AGENTS.md                    project instructions pw code reads every session
 .agents/
-  agents/*.md                the seven custom agent definitions
+  agents/*.md                the custom agent definitions
   mcp/heat_server.py         stdlib-only MCP server: run_heat + poll_heat, evaluate_run,
                              list_runs + compare_runs + write_summary (see .agents/mcp/README.md)
   mcp/_site_query.py         protected copy the server runs; must match scripts/_site_query.py
   hooks/agent_digest.py      hook: redacted per-run session digest for compare-agents
+app/fractal/
+  render.py fractal_core.py  bag-of-tasks Mandelbrot canvas rendered tile by tile on the
+                             fleet-wide Ray cluster (see app/fractal/README.md)
 app/heat/
   heat.c                     the MPI heat solver (equal 1-D slabs, halos over MPI)
   Makefile                   cpu + gpu (OpenACC) build targets
@@ -106,6 +109,9 @@ workflows/
                              platform-logged workflow templates (the layer
                              agents use for every cluster operation). run =
                              stage+build+submit merged; validate runs on cluster.
+  ray/fractal .yaml          the fleet-wide Ray cluster (a local copy of
+                             ray-cluster's general.yaml) and the fractal
+                             canvas actions on it
 runs/                        per-invocation staging (like plan-mode's ./plans);
                              each run: <agent>-<target>-<NNNNNN>/ (gitignored)
 campaigns/grid-sweep.yaml    an example campaign

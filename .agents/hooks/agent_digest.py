@@ -17,6 +17,9 @@ Writes runs/<id>/agent-digest.json for every run or evaluation the session CREAT
   - evaluator-mcp:   an evaluate_run result carrying the evaluator_id
   - evaluator:       a Bash `pw workflows run ... --name <eval-id>-fetch|-validate ...`
   - site-prep-mcp:   a run_spack or copy_buildcache result carrying the run_id
+  - ray-launcher-mcp: a launch_ray result carrying the run_id
+  - ray-runner-mcp:  a new_canvas result carrying the canvas_id, or a render_tiles
+                     result carrying the run_id
 A tool result stored as a list of text parts (claude-code/opus) is read as its
 joined text, the same as a plain string result.
 Sessions that merely mention an id (compare-agents, the main agent) produce
@@ -47,6 +50,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 RUNS = os.path.join(REPO, "runs")
 RUN_ID = re.compile(r"\b(site-runner(?:-mcp)?-[A-Za-z0-9._-]+?-\d{6})\b")
 PREP_ID = re.compile(r"site-prep-mcp-[A-Za-z0-9._-]+?-\d{6}")
+RAY_LAUNCH_ID = re.compile(r"ray-launcher-mcp-fleet-\d{6}")
+RAY_RUN_ID = re.compile(r"ray-runner-mcp-fleet-\d{6}")
 EVAL_STEP = re.compile(r"^(evaluator-[A-Za-z0-9._-]+?-\d{6})-(?:fetch|validate)$")
 BASH_KEEP = ("pw workflows ", "python3 scripts/_site_query.py", "git remote get-url",
              "git rev-parse", "mkdir runs/", "mkdir -p runs/", "cp workflows/",
@@ -130,7 +135,8 @@ def _result_info(tool, content):
         try:
             res = json.loads(text)
             info.update({k: res.get(k) for k in ("status", "run_id", "state", "done",
-                                                 "evaluator_id", "overall") if k in res})
+                                                 "evaluator_id", "overall", "canvas_id")
+                         if k in res})
             if "status" in res:
                 info["ok"] = res["status"] not in HEAT_FAILED
         except (ValueError, AttributeError):
@@ -197,6 +203,15 @@ def digest(transcript, agent_type=None, event=None):
                         if call["tool"] in ("mcp__heat__run_spack", "mcp__heat__copy_buildcache") \
                                 and PREP_ID.fullmatch(str(call.get("run_id") or "")):
                             created[call["run_id"]] = "site-prep-mcp"
+                        if call["tool"] == "mcp__heat__launch_ray" \
+                                and RAY_LAUNCH_ID.fullmatch(str(call.get("run_id") or "")):
+                            created[call["run_id"]] = "ray-launcher-mcp"
+                        if call["tool"] == "mcp__heat__new_canvas" \
+                                and RAY_RUN_ID.fullmatch(str(call.get("canvas_id") or "")):
+                            created[call["canvas_id"]] = "ray-runner-mcp"
+                        if call["tool"] == "mcp__heat__render_tiles" \
+                                and RAY_RUN_ID.fullmatch(str(call.get("run_id") or "")):
+                            created[call["run_id"]] = "ray-runner-mcp"
 
     return {
         "captured_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

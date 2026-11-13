@@ -1,0 +1,192 @@
+# fractal.yaml — push fractal work into a RUNNING Ray cluster (see ray.yaml).
+#
+#   pw workflows run -i runs/<id>/fractal.inputs.json --name <id> runs/<id>/fractal.yaml
+#
+# Runs on the PW workspace, where the Ray head and its dashboard live. Steps:
+#   1. STAGE: sparse-clone this repo's app/fractal at the exact commit (provenance
+#      by SHA, as run.yaml does for heat) into ~/pw-fractal/.src/<run_id>.
+#   2. Find the cluster's job dir EXACTLY by its endpoint name (the ENDPOINT_NAME
+#      file ray-cluster writes there; searched under ~/pw/jobs and /tmp/runs, where
+#      run 2026-11-13 workable-ringtail put its job dir on the workspace), then read RAY_HEAD_IP, SESSION_PORT and
+#      RAY_VENV_DIR from it and activate the cluster's venv.
+#   3. ACTION on the canvas ~/pw-fractal/<canvas_id>/ (see app/fractal/README.md):
+#      init    create it and show it EMPTY on the dashboard (canvas_id = this run's id)
+#      add     render more tiles: submitted as a Ray Job (`ray job submit`) whose
+#              driver runs on the head host, the one place that reaches every
+#              worker; the step follows its logs until it ends. Cancelling this run
+#              stops the Ray Job (the step's cleanup runs `ray job stop`).
+#      status  print the canvas progress
+#      redraw  re-post the canvas and every finished tile to the dashboard
+# Every action ends with ONE JSON line from render.py ({"status": ...}); the MCP
+# tools read it from the log.
+#
+# Empty inputs are left out of the render.py command line (its defaults apply).
+
+permissions: ['*']
+
+'on':
+  execute:
+    inputs:
+      action:
+        label: init | add | status | redraw
+        type: string
+        optional: false
+      run_id:
+        label: This run's id (the ray-runner-mcp id); the Ray Job submission id for add
+        type: string
+        optional: false
+      canvas_id:
+        label: Canvas id (for init, the run's own id)
+        type: string
+        optional: false
+      endpoint:
+        label: The Ray cluster's endpoint name (ray-cluster-<slug>)
+        type: string
+        optional: false
+      repo_url:
+        label: Public git URL to clone (autodetected; user may override)
+        type: string
+        optional: false
+      commit:
+        label: Commit SHA to check out (autodetected; user may override)
+        type: string
+        optional: false
+      tiles:
+        label: init — tiles per side (the canvas is N x N)
+        type: string
+        optional: true
+      tile_px:
+        label: init — pixels per tile side
+        type: string
+        optional: true
+      max_iter:
+        label: init — escape-time iterations per pixel
+        type: string
+        optional: true
+      palette:
+        label: init — electric | fire | ocean | cosmic
+        type: string
+        optional: true
+      count:
+        label: add — number of tiles (or a cap for rect)
+        type: string
+        optional: true
+      all:
+        label: add — every tile not yet done (true/false)
+        type: string
+        optional: true
+      rect:
+        label: add — x0,y0,x1,y1 tile rectangle
+        type: string
+        optional: true
+      order:
+        label: add — row | random | center | spiral
+        type: string
+        optional: true
+
+jobs:
+  fractal:
+    steps:
+      - name: Stage — sparse clone app/fractal at the commit
+        run: |
+          set -euo pipefail
+          echo "=== STAGE ==="
+          RUN_ID='${{ inputs.run_id }}'
+          case "$RUN_ID" in *[!A-Za-z0-9._-]*|"") echo "fractal: bad run_id" >&2; exit 2;; esac
+          SRC="$HOME/pw-fractal/.src/$RUN_ID"
+          if [ -e "$SRC" ]; then echo "fractal: $SRC already exists" >&2; exit 2; fi
+          mkdir -p "$(dirname "$SRC")"
+          git clone --quiet --filter=blob:none --no-checkout '${{ inputs.repo_url }}' "$SRC"
+          cd "$SRC"
+          git sparse-checkout set app/fractal
+          git checkout --quiet '${{ inputs.commit }}'
+          echo "STAGED commit=$(git rev-parse HEAD) dest=$SRC"
+          ls -1 app/fractal/render.py app/fractal/fractal_core.py
+
+      - name: Run — locate the cluster and act on the canvas
+        run: |
+          set -euo pipefail
+          echo "=== ${{ inputs.action }} ==="
+          RUN_ID='${{ inputs.run_id }}'
+          CANVAS_ID='${{ inputs.canvas_id }}'
+          EP='${{ inputs.endpoint }}'
+          ACTION='${{ inputs.action }}'
+          for v in "$CANVAS_ID" "$EP"; do
+            case "$v" in *[!A-Za-z0-9._-]*|"") echo "fractal: bad canvas_id or endpoint '$v'" >&2; exit 2;; esac
+          done
+          SRC="$HOME/pw-fractal/.src/$RUN_ID/app/fractal"
+          CANVAS="$HOME/pw-fractal/$CANVAS_ID"
+
+          # The cluster's job dir is the one whose ENDPOINT_NAME is exactly $EP.
+          JOB_DIR=""
+          while IFS= read -r f; do
+            if [ "$(cat "$f" 2>/dev/null)" = "$EP" ]; then JOB_DIR="$(dirname "$f")"; break; fi
+          done < <(find "$HOME/pw/jobs" /tmp/runs -maxdepth 6 -name ENDPOINT_NAME -type f 2>/dev/null)
+          if [ -z "$JOB_DIR" ]; then
+            echo "fractal: no Ray cluster job dir with ENDPOINT_NAME=$EP under ~/pw/jobs or /tmp/runs (is the cluster running on this workspace?)" >&2
+            exit 3
+          fi
+          for f in RAY_HEAD_IP SESSION_PORT RAY_VENV_DIR; do
+            [ -s "$JOB_DIR/$f" ] || { echo "fractal: $JOB_DIR/$f missing" >&2; exit 3; }
+          done
+          RAY_HEAD_IP="$(cat "$JOB_DIR/RAY_HEAD_IP")"
+          DASH="http://localhost:$(cat "$JOB_DIR/SESSION_PORT")"
+          VENV="$(cat "$JOB_DIR/RAY_VENV_DIR")"
+          # shellcheck disable=SC1091
+          source "$VENV/bin/activate"
+          export RAY_ADDRESS="$RAY_HEAD_IP:6379" RAY_HEAD_IP
+          echo "cluster job dir: $JOB_DIR"
+          echo "ray head: $RAY_ADDRESS  dashboard: $DASH  python: $(command -v python)"
+
+          ARGS=()
+          add_arg() { if [ -n "$2" ] && [ "$2" != "undefined" ] && [ "$2" != "null" ]; then ARGS+=("$1" "$2"); fi; }
+          case "$ACTION" in
+            init)
+              [ "$CANVAS_ID" = "$RUN_ID" ] || { echo "fractal: init must use canvas_id = run_id" >&2; exit 2; }
+              add_arg --tiles '${{ inputs.tiles }}'
+              add_arg --tile-px '${{ inputs.tile_px }}'
+              add_arg --max-iter '${{ inputs.max_iter }}'
+              add_arg --palette '${{ inputs.palette }}'
+              cd "$SRC"
+              "$VENV/bin/python" render.py init --canvas "$CANVAS" --dashboard-url "$DASH" \
+                --endpoint "$EP" --commit '${{ inputs.commit }}' "${ARGS[@]}"
+              ;;
+            add)
+              add_arg --count '${{ inputs.count }}'
+              add_arg --rect '${{ inputs.rect }}'
+              add_arg --order '${{ inputs.order }}'
+              if [ '${{ inputs.all }}' = "true" ]; then ARGS+=(--all); fi
+              echo "$RUN_ID" > "$HOME/pw-fractal/.src/$RUN_ID/RAY_JOB_ID"
+              ray job submit --address http://127.0.0.1:8265 --submission-id "$RUN_ID" --no-wait \
+                --working-dir "$SRC" -- \
+                "$VENV/bin/python" render.py add --canvas "$CANVAS" --dashboard-url "$DASH" \
+                --submission "$RUN_ID" "${ARGS[@]}"
+              echo "SUBMITTED ray_job=$RUN_ID canvas=$CANVAS_ID"
+              # Follow the driver's output until the Ray Job ends (its last line is the JSON record).
+              ray job logs --address http://127.0.0.1:8265 --follow "$RUN_ID" || true
+              STATE="$(ray job status --address http://127.0.0.1:8265 "$RUN_ID" 2>/dev/null | grep -Eo 'SUCCEEDED|FAILED|STOPPED' | tail -1 || true)"
+              echo "RAY_JOB_STATE=${STATE:-UNKNOWN}"
+              touch "$HOME/pw-fractal/.src/$RUN_ID/RAY_JOB_DONE"
+              # render.py exits 1 when some tiles failed; the JSON line says which.
+              [ "$STATE" = "SUCCEEDED" ] || [ "$STATE" = "FAILED" ] || exit 4
+              ;;
+            status|redraw)
+              cd "$SRC"
+              "$VENV/bin/python" render.py "$ACTION" --canvas "$CANVAS" --dashboard-url "$DASH"
+              ;;
+            *)
+              echo "fractal: action must be init, add, status or redraw" >&2; exit 2;;
+          esac
+        cleanup: |
+          # A cancelled add stops its Ray Job (its tile reservations expire with it).
+          RUN_ID='${{ inputs.run_id }}'
+          D="$HOME/pw-fractal/.src/$RUN_ID"
+          if [ -f "$D/RAY_JOB_ID" ] && [ ! -f "$D/RAY_JOB_DONE" ]; then
+            for f in $(find "$HOME/pw/jobs" /tmp/runs -maxdepth 6 -name ENDPOINT_NAME -type f 2>/dev/null); do
+              if [ "$(cat "$f")" = '${{ inputs.endpoint }}' ]; then
+                source "$(cat "$(dirname "$f")/RAY_VENV_DIR")/bin/activate" 2>/dev/null || true
+                ray job stop --address http://127.0.0.1:8265 "$RUN_ID" || true
+                break
+              fi
+            done
+          fi

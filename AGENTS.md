@@ -1,9 +1,10 @@
 # Project: HPC Fleet Workshop
 
 This workspace drives a fleet of HPC clusters (Slurm and PBS sites) from
-`pw code`. The workload is a 2D steady-state heat solver (MPI, optional GPU) in
-`app/heat/`. Everything the agents need to know about the fleet lives in
-`sites/sites.yaml`.
+`pw code`. The main workload is a 2D steady-state heat solver (MPI, optional GPU) in
+`app/heat/`, a tightly coupled job run per target. Its counterpart is `app/fractal/`,
+a bag-of-tasks renderer run on one Ray cluster spanning the fleet (see RAY FLEET).
+Everything the agents need to know about the fleet lives in `sites/sites.yaml`.
 
 ---
 
@@ -62,7 +63,7 @@ MAIN AGENT — ALWAYS DELEGATE CLUSTER WORK. Check your own tool list first:
   Task tool. The names
   `site-runner`, `site-runner-mcp`, `evaluator`, `evaluator-mcp`,
   `compare-agents`, `campaign-orchestrator`, `orchestrator-mcp`,
-  `site-prep-mcp` and `capacity-analyst` are agents,
+  `site-prep-mcp`, `ray-launcher-mcp`, `ray-runner-mcp` and `capacity-analyst` are agents,
   not procedures. Call Task with `background: false` unless you have other
   independent work to do meanwhile, so you wait for the agent's result and report
   it: in a one-shot `pw code -p` run, a background agent finishes after the
@@ -275,6 +276,42 @@ Route requests to prepare a target, copy a build cache, or build or check the
 Spack stack to `site-prep-mcp`. Pre-approve `--allowedTools
 mcp__heat__copy_buildcache --allowedTools mcp__heat__run_spack --allowedTools
 mcp__heat__spack_status`.
+RAY FLEET (the bag-of-tasks counterpart to heat; not part of a campaign; run only
+when a human asks): `app/fractal/` is an N x N Mandelbrot canvas rendered tile by
+tile on ONE long-lived Ray cluster that spans every cpu target (see
+`app/fractal/README.md`).
+`ray-launcher-mcp` (`--tools launch_ray,ray_status,stop_ray`) owns the cluster:
+- `launch_ray([walltime])` stages `runs/ray-launcher-mcp-fleet-<NNNNNN>/` and runs
+  `workflows/ray.yaml`, a local copy of ray-cluster's `general.yaml`
+  (`parallelworks/workflows`, provenance in its header) run as the top-level
+  workflow, with the head and dashboard on the PW workspace and one worker
+  row per cpu target, mapped from the target's directives by `ray_worker_row` (the
+  directives are never edited).
+- The cluster stays up after the run completes, until `stop_ray(run_id)` or the
+  workers' walltime ends.
+- `stop_ray` runs `pw endpoints delete ray-cluster-<slug>`, ray-cluster's
+  documented teardown. It is the ONE platform action that is not a `pw workflows run`
+  (plus read-only `pw endpoints list`), and the agent calls it only when the user
+  asks.
+- Only one Ray head runs on the workspace, so `launch_ray` refuses while any
+  `ray-cluster-*` endpoint is listed.
+
+`ray-runner-mcp` (`--tools new_canvas,render_tiles,render_status,ray_status`) pushes
+work into a READY cluster, never launching or stopping it:
+- `new_canvas(tiles, ...)` shows an empty canvas.
+- `render_tiles(canvas_id, count|all|rect)` starts a render (a Ray Job on the head)
+  and returns.
+- `render_status(run_id)` reports it.
+
+Each call that starts a workflow gets its own id `ray-runner-mcp-fleet-<NNNNNN>`;
+a canvas's id is its `new_canvas` call's id. Canvas state lives on the head host
+in `~/pw-fractal/<canvas-id>/`. People can push tiles by hand into the same canvas
+(README). Route requests to launch, check or stop the Ray cluster to
+`ray-launcher-mcp`, and requests to render fractal tiles or make a canvas to
+`ray-runner-mcp`. Pre-approve `--allowedTools mcp__heat__launch_ray --allowedTools
+mcp__heat__ray_status --allowedTools mcp__heat__stop_ray` and `--allowedTools
+mcp__heat__new_canvas --allowedTools mcp__heat__render_tiles --allowedTools
+mcp__heat__render_status --allowedTools mcp__heat__ray_status`.
 SESSION DIGESTS: `SubagentStop`/`SessionEnd` hooks in `.agents/settings.json`
 run `.agents/hooks/agent_digest.py`, which writes a redacted
 `runs/<id>/agent-digest.json` (tokens, model, turns, tool-call sequence; no
