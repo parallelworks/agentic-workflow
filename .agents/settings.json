@@ -13,7 +13,13 @@
       "mcp__heat__write_summary",
       "mcp__heat__copy_buildcache",
       "mcp__heat__run_spack",
-      "mcp__heat__spack_status"
+      "mcp__heat__spack_status",
+      "mcp__heat__launch_ray",
+      "mcp__heat__ray_status",
+      "mcp__heat__stop_ray",
+      "mcp__heat__new_canvas",
+      "mcp__heat__render_tiles",
+      "mcp__heat__render_status"
     ]
   },
   "hooks": {
