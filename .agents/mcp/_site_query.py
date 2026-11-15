@@ -8,6 +8,13 @@ gpus_per_node, mpi_launch), or one of two synthetics:
   env_load_joined   -> "cmd1 && cmd2" verbatim (or "true" if none)
   directives        -> the verbatim multi-line #SBATCH/#PBS block, as-is
 
+Output always ends with exactly one newline, so the values of queries chained
+with `;` print on separate lines instead of running together (2026-11-15:
+`ssh_name; scheduler; mode; ...` printed `pw://.../azureslurmcpu4mpiexec`).
+A value that already ends with a newline, such as every directives block, is
+printed unchanged, so `... directives | base64 -w0` gives the same bytes as
+before. heat_server.py removes the added newline from single-value fields.
+
 Uses PyYAML when available (robust); otherwise a minimal fallback parser that
 understands the specific shape of this file, INCLUDING the `directives: |` block
 scalar. The fallback exists so the repo clones and runs with no pip install.
@@ -106,6 +113,12 @@ def _fallback_parse(path):
     return {"targets": targets}
 
 
+def _emit(val):
+    """Print val ending in exactly one newline: add one only if it is missing."""
+    val = str(val)
+    print(val, end="" if val.endswith("\n") else "\n")
+
+
 def main():
     if len(sys.argv) != 4:
         print("", end="")
@@ -115,7 +128,7 @@ def main():
     targets = data.get("targets", []) if isinstance(data, dict) else []
     entry = next((t for t in targets if t.get("name") == target), None)
     if entry is None:
-        print("", end="")
+        _emit("")
         return 0
 
     if field == "env_load_joined":
@@ -123,11 +136,11 @@ def main():
         if isinstance(cmds, dict):
             cmds = []
         # Join verbatim with && — NO prefixing. Each entry is a full command.
-        print(" && ".join(cmds) or "true", end="")
+        _emit(" && ".join(cmds) or "true")
         return 0
 
     val = entry.get(field)
-    print("" if val is None else val, end="")
+    _emit("" if val is None else val)
     return 0
 
 

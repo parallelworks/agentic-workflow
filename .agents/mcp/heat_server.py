@@ -608,7 +608,13 @@ def _site(target, field):
                        capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
         raise RuntimeError("_site_query.py failed for %s/%s" % (target, field))
-    return p.stdout
+    if field == "directives":
+        # Verbatim block; it already ended in a newline, so it is unchanged. A
+        # missing block prints only the added newline: return "" as before.
+        return "" if p.stdout == "\n" else p.stdout
+    # _site_query.py ends every value with a newline (so chained shell queries
+    # don't run together); drop it to get the bare value, as before.
+    return p.stdout[:-1] if p.stdout.endswith("\n") else p.stdout
 
 
 def _git(*args):
