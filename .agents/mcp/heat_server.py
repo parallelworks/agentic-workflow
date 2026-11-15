@@ -129,7 +129,7 @@ MAX_CAMPAIGN_RUNS = 21
 
 DEFAULT_TOL = "1e-3"
 DEFAULT_L2_TOLERANCE = "1e-6"  # validate.yaml's pass tolerance; NOT the solver's tol
-DEFAULT_MAX_ITER = 50000
+DEFAULT_MAX_ITER = 1000000
 SUBMIT_WAIT_SECONDS = 540  # stays under the agent's 10m MCP timeout
 POLL_BUDGET_SECONDS = 420  # one poll_heat call; leaves headroom under 10m
 POLL_INTERVAL_SECONDS = 30
@@ -208,7 +208,7 @@ RUN_TOOL = {
             "target": {"type": "string", "description": "Target name, e.g. bigcluster-cpu"},
             "grid": {"type": "integer", "minimum": 1, "description": "Global grid size N (NxN), e.g. 128"},
             "tol": {"type": "string", "description": "Convergence tolerance (optional, default 1e-3)"},
-            "max_iter": {"type": "integer", "minimum": 1, "description": "Max iterations (optional, default 50000)"},
+            "max_iter": {"type": "integer", "minimum": 1, "description": "Max iterations (optional, default 1000000)"},
         },
         "required": ["target", "grid"],
         "additionalProperties": False,

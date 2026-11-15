@@ -90,7 +90,7 @@
 /* -------- defaults (all overridable on the command line) -------- */
 #define DEFAULT_GRID     512
 #define DEFAULT_TOL      1e-4
-#define DEFAULT_MAXITER  20000
+#define DEFAULT_MAXITER  1000000
 #define BOUND_HOT        100.0   /* top edge temperature   */
 #define BOUND_COLD       0.0     /* other edges            */
 

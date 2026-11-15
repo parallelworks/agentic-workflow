@@ -149,6 +149,7 @@ targets:
     mode: cpu
     mpi_ranks: 4
     mpi_launch: "mpiexec.openmpi"
+    timeout: "01:00:00"
     env_load:
       - export HELLO_FROM_SITES_YAML=hello
     directives: |
@@ -160,6 +161,7 @@ targets:
     mode: cpu
     mpi_ranks: 4
     mpi_launch: "mpiexec"
+    timeout: "01:00:00"
     env_load:
       - eval `~/spack/bin/spack load --sh openmpi@5.0.10~cuda`
     directives: |
@@ -171,6 +173,7 @@ targets:
     mode: gpu
     mpi_ranks: 1
     mpi_launch: "mpiexec"
+    timeout: "01:00:00"
     env_load:
       - eval `~/spack/bin/spack load --sh nvhpc`
     directives: |

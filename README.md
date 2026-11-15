@@ -150,7 +150,7 @@ WORKSHOP.md                  facilitator guide: three exercises, timed
 2. **Sanity-check the solver locally** (optional, needs MPI):
    ```
    make -C app/heat cpu
-   mpirun -np 4 app/heat/heat --grid 128 --tol 1e-3 --max-iter 50000
+   mpirun -np 4 app/heat/heat --grid 128 --tol 1e-3 --max-iter 1000000
    ```
    You should see a one-line JSON record with `"converged":true`.
 3. **Dry-run a workflow** to validate it against your platform:

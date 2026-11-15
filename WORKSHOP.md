@@ -33,7 +33,7 @@ Do this in advance — it is where workshops actually go wrong:
       one.
 - [ ] Regenerate the reference field if you change the grid default, then
       compress it (validate.py reads `.gz` directly):
-      `mpirun -np 1 app/heat/heat --grid 128 --tol 1e-3 --max-iter 50000
+      `mpirun -np 1 app/heat/heat --grid 128 --tol 1e-3 --max-iter 1000000
        --dump app/heat/reference/heat_128.ref && gzip -9n app/heat/reference/heat_128.ref`
 
 ## Opening (10 min)
